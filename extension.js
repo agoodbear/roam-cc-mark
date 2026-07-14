@@ -185,7 +185,9 @@ function buildBubbleDOM(m, anchorEl) {
     const isNote = m.intent === "查" || m.intent === "議";
     b.innerHTML =
       `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-diff"></div>` +
-      `<div class="ccm-bactions"><button class="ccm-acc">${isNote ? "✅ 完成" : "✅ 接受"}</button><button class="ccm-ret">↩ 退回</button></div>`;
+      `<div class="ccm-bactions"><button class="ccm-acc">${isNote ? "✅ 完成" : "✅ 接受"}</button>` +
+      (isNote ? `<button class="ccm-improve">✎ 改進這句</button>` : "") +
+      `<button class="ccm-ret">↩ 退回</button></div>`;
     const diff = b.querySelector(".ccm-diff");
     const row = (cls, tag, text) => {
       const d = document.createElement("div"); d.className = "ccm-drow " + cls;
@@ -204,6 +206,12 @@ function buildBubbleDOM(m, anchorEl) {
     }
     b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); acceptMark(m); };
     b.querySelector(".ccm-ret").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
+    if (isNote) b.querySelector(".ccm-improve").onclick = (e) => {
+      e.stopPropagation();
+      const src = (m.note || m.proposal || "").trim();   // 把 CC 查到的來源/建議塞進指令，轉潤稿後 CC 才不會又要重查
+      const seed = (m.intent === "查" ? "把查證到的來源整合進這句：" : "照這個建議把這句改寫：") + src;
+      openEdit(m, anchorEl, { intent: "潤", seed, ref: "" });
+    };
   } else {
     b.innerHTML = `<div class="ccm-lbl">${m.intent}・待CC</div><div class="ccm-ins"></div>` +
       `<div class="ccm-bactions"><button class="ccm-bedit">編輯</button><button class="ccm-bdel">刪除</button></div>`;
@@ -502,13 +510,22 @@ function onKeyDown(e) {
 }
 
 // ── 面板 ─────────────────────────────────────────────────────
-function openEdit(m, anchorEl) {
+// 退回／改進面板的參考列：把 CC 上一版提案（或查證/建議）帶進來，讓 Bear 對著它下第二次指令
+function refText(m) {
+  if (!m || m.state !== "review") return "";
+  if (m.proposal) return "上一版 CC 提案：「" + m.proposal + "」";
+  if (m.note) return "CC " + (m.intent === "查" ? "查證" : "建議") + "：" + m.note;
+  return "";
+}
+function openEdit(m, anchorEl, opts) {
   unpinBubble();
   pending = { mode: "edit", childUid: m.childUid, quote: m.quote, occurrence: m.occurrence };
-  panelIntent = m.intent;
+  panelIntent = (opts && opts.intent) || m.intent;
   const el = anchorEl || findBlockTextEl(m.parentUid);
   const r = el ? el.getBoundingClientRect() : { left: window.innerWidth / 2, bottom: 200, width: 0 };
-  showPanel(r.left + window.scrollX + r.width / 2, r.bottom + window.scrollY, m.quote ? "「" + m.quote + "」" : "（整段）", m.instruction);
+  const prefill = (opts && opts.seed != null) ? opts.seed : m.instruction;
+  const ref = (opts && typeof opts.ref === "string") ? opts.ref : refText(m);   // 改進這句已把來源塞進 seed，就不重複顯示
+  showPanel(r.left + window.scrollX + r.width / 2, r.bottom + window.scrollY, m.quote ? "「" + m.quote + "」" : "（整段）", prefill, ref);
 }
 function setIntent(it) {
   if (!INTENTS.includes(it)) return;
@@ -519,10 +536,12 @@ function setIntent(it) {
 }
 function showTrigger(x, y) { triggerBtn.style.display = "block"; triggerBtn.style.left = x + "px"; triggerBtn.style.top = y + "px"; }
 function hideTrigger() { if (triggerBtn) triggerBtn.style.display = "none"; }
-function showPanel(x, y, label, prefill) {
+function showPanel(x, y, label, prefill, ref) {
   const isEdit = pending && pending.mode === "edit";
   panelEl.querySelector(".ccm-head").textContent = isEdit ? "✏️ 修改標記" : "✏️ 請CC修改";
   panelEl.querySelector(".ccm-picked").textContent = label;
+  const refEl = panelEl.querySelector(".ccm-ref");
+  if (ref) { refEl.textContent = ref; refEl.style.display = "block"; } else { refEl.textContent = ""; refEl.style.display = "none"; }
   panelEl.querySelector(".ccm-delete").style.display = isEdit ? "inline-block" : "none";
   setIntent(panelIntent);
   const ta = panelEl.querySelector("textarea");
@@ -603,6 +622,7 @@ function buildUI() {
     '<div class="ccm-intents">' + INTENTS.map((it, i) => `<button data-intent="${it}" title="⌥${i + 1}">${it}</button>`).join("") + '</div>' +
     '<div class="ccm-hint"></div>' +
     '<div class="ccm-picked"></div>' +
+    '<div class="ccm-ref"></div>' +
     '<textarea placeholder="一句話說怎麼改…（Enter 送出，⌥1–4 選意圖）"></textarea>' +
     '<div class="ccm-chips"><span>口語化</span><span>縮短</span><span>去 AI 腔</span></div>' +
     '<div class="ccm-actions"><button class="ccm-delete">刪除</button><button class="ccm-cancel">取消</button><button class="ccm-save">送出</button></div>';
@@ -725,6 +745,8 @@ function injectStyle() {
   .ccm-bdel,.ccm-ret{background:#fff;color:#e5484d;border:1px solid #f3c0c2 !important;}
   .ccm-ret{color:#8a6d3b;border-color:#e5cf9e !important;}
   .ccm-bdel:hover,.ccm-ret:hover{background:#fbf4e8;}
+  .ccm-improve{background:#fff;color:#2b7de0;border:1px solid #bcd6f5 !important;}
+  .ccm-improve:hover{background:#f0f6fe;}
   .ccm-trigger{position:absolute;z-index:9996;background:#2b7de0;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.22);cursor:pointer;user-select:none;white-space:nowrap;transform:translate(-50%,-100%);}
   .ccm-trigger:hover{background:#1e6fd0;}
   .ccm-panel{position:absolute;z-index:9995;width:300px;background:#fff;border:1px solid #d5dbe2;border-radius:11px;box-shadow:0 10px 30px rgba(16,22,26,.22);padding:11px 12px 12px;transform:translateX(-50%);}
@@ -734,6 +756,7 @@ function injectStyle() {
   .ccm-intents button.on{background:#2b7de0;color:#fff;border-color:#2b7de0;}
   .ccm-hint{font-size:11px;color:#98a2ac;margin-bottom:7px;}
   .ccm-panel .ccm-picked{font-size:11.5px;color:#8a94a0;background:#f4f6f8;border-radius:6px;padding:4px 7px;margin-bottom:8px;max-height:42px;overflow:hidden;}
+  .ccm-ref{display:none;font-size:11.5px;color:#1a7f54;background:#eefaf3;border:1px solid #cdeeda;border-radius:6px;padding:5px 8px;margin-bottom:8px;line-height:1.5;max-height:72px;overflow:auto;}
   .ccm-panel textarea{width:100%;min-height:50px;resize:vertical;border:1px solid #d5dbe2;border-radius:7px;padding:7px 8px;font-size:13px;font-family:inherit;line-height:1.5;outline:none;box-sizing:border-box;}
   .ccm-panel textarea:focus{border-color:#2b7de0;box-shadow:0 0 0 3px rgba(43,125,224,.12);}
   .ccm-chips{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0;}
