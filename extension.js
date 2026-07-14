@@ -102,14 +102,19 @@ function findBlockTextEl(uid) {
   for (const el of els) if (el.id && el.id.indexOf(uid) !== -1) return el;
   return document.querySelector('[id^="block-input"][id$="' + uid + '"]');
 }
+// 從網址列同步讀目前開的 page/block uid（getOpenPageOrBlockUid 在某些版本回 Promise，不能用）
+function currentOpenUid() {
+  try { const m = (window.location.hash || "").match(/\/page\/([^\/?]+)/); return m ? decodeURIComponent(m[1]) : null; }
+  catch (e) { return null; }
+}
 function currentPage() {
   try {
-    const uid = window.roamAlphaAPI.ui.mainWindow.getOpenPageOrBlockUid();
+    const uid = currentOpenUid();
     if (!uid) return null;
     const p = window.roamAlphaAPI.pull("[:node/title :block/uid {:block/page [:node/title :block/uid]}]", [":block/uid", uid]);
     if (p && p[":node/title"]) return { uid, title: p[":node/title"] };
     if (p && p[":block/page"]) return { uid: p[":block/page"][":block/uid"], title: p[":block/page"][":node/title"] };
-    return { uid, title: "(目前頁)" };
+    return null;
   } catch (e) { return null; }
 }
 
@@ -226,12 +231,12 @@ function refreshDecorations(force) {
   document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review")
     .forEach((e) => cur.push((e.dataset.child || e.dataset.ccmChild) + ":" + (e.dataset.state || "")));
   const same = sig === cur.sort().join("|");
-  if (!force && same) { updatePill(todoCount, reviewCount, marks.length, desired.length); return; }
+  if (!force && same) { updatePill(todoCount, reviewCount); return; }
 
   applying = true;
   clearDecorations();
   for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); }
-  updatePill(todoCount, reviewCount, marks.length, desired.length);
+  updatePill(todoCount, reviewCount);
   setTimeout(() => { applying = false; }, 0);
 }
 const debouncedRefresh = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(refreshDecorations, 250); };
@@ -512,11 +517,11 @@ function buildUI() {
   document.body.appendChild(toggleBtn); updateToggle();
 }
 
-function updatePill(todo, review, qTotal, domCount) {
+function updatePill(todo, review) {
   if (!pillEl) return;
-  pillEl.style.display = "block";   // 診斷版：一律顯示
-  pillEl.innerHTML = `📝 待處理 <b>${todo}</b>` + (review ? ` · <span class="ccm-rev">待審 ${review}</span>` : "")
-    + ` <span style="color:#c3ccd4;font-weight:400">[q${qTotal === undefined ? "?" : qTotal}·畫${domCount === undefined ? "?" : domCount}]</span>`;
+  if (!todo && !review) { pillEl.style.display = "none"; if (navEl) navEl.style.display = "none"; return; }
+  pillEl.style.display = "block";
+  pillEl.innerHTML = `📝 待處理 <b>${todo}</b>` + (review ? ` · <span class="ccm-rev">待審 ${review}</span>` : "");
 }
 
 // ── 上下導覽 ─────────────────────────────────────────────────
