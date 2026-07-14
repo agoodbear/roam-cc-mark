@@ -135,7 +135,7 @@ function attachBubble(anchorEl, instruction, childUid) {
   // hover：帶寬限延遲，讓滑鼠可以移進泡泡點按鈕（不再一移就消失）
   let b = null, hideT = null;
   const cancelHide = () => { if (hideT) { clearTimeout(hideT); hideT = null; } };
-  const scheduleHide = () => { cancelHide(); hideT = setTimeout(() => { if (b) { b.remove(); b = null; } }, 320); };
+  const scheduleHide = () => { cancelHide(); hideT = setTimeout(() => { if (b) { b.remove(); b = null; } }, 450); };
   const show = () => {
     cancelHide();
     if (!b) {
@@ -174,24 +174,29 @@ function clearDecorations() {
   alwaysBubbles = [];
 }
 
-function refreshDecorations() {
+function refreshDecorations(force) {
   if (!overlayEl) return;
+  const rows = queryMarks();
+  const desired = [];
+  for (const [cu, pu, s] of rows) {
+    const el = findBlockTextEl(pu);
+    if (el) desired.push({ cu, s, el });
+  }
+  // 目前畫面上已有的裝飾（childUid 集合）
+  const current = new Set();
+  document.querySelectorAll(".ccm-underline").forEach((e) => current.add(e.dataset.child));
+  document.querySelectorAll(".ccm-block-flag").forEach((e) => current.add(e.dataset.ccmChild));
+  const same = desired.length === current.size && desired.every((d) => current.has(d.cu));
+  if (!force && same) { updatePill(rows.length, desired.length); return; }  // 沒變就不重畫 → 不閃、泡泡不被清掉、按鈕點得到
+
   applying = true;                 // 忽略下面這些 DOM 變動觸發的自我重繪
   clearDecorations();
-  const rows = queryMarks();
-  let visible = 0;
-  for (const [childUid, parentUid, s] of rows) {
-    const el = findBlockTextEl(parentUid);
-    if (!el) continue;             // 該 block 目前不在畫面上
-    visible++;
+  for (const { cu, s, el } of desired) {
     const { instruction, quote } = parseMark(s);
-    const ok = quote && wrapNeedle(el, quote, childUid, instruction);
-    if (!ok) {
-      el.classList.add("ccm-block-flag");
-      el.dataset.ccmChild = childUid;
-    }
+    const ok = quote && wrapNeedle(el, quote, cu, instruction);
+    if (!ok) { el.classList.add("ccm-block-flag"); el.dataset.ccmChild = cu; }
   }
-  updatePill(rows.length, visible);
+  updatePill(rows.length, desired.length);
   setTimeout(() => { applying = false; }, 0);
 }
 
@@ -211,7 +216,7 @@ async function createMark(parentUid, quote, instruction) {
     location: { "parent-uid": parentUid, order: "last" },
     block: { string: markString(instruction, quote), uid },
   });
-  setTimeout(refreshDecorations, 120);
+  setTimeout(() => refreshDecorations(true), 120);
 }
 
 async function updateMark(childUid, instruction, quote) {
@@ -220,13 +225,13 @@ async function updateMark(childUid, instruction, quote) {
       block: { uid: childUid, string: markString(instruction, quote) },
     });
   } catch (e) { console.warn("[請CC修改] update failed", e); }
-  setTimeout(refreshDecorations, 120);
+  setTimeout(() => refreshDecorations(true), 120);
 }
 
 async function deleteMark(childUid) {
   try { await window.roamAlphaAPI.deleteBlock({ block: { uid: childUid } }); }
   catch (e) { console.warn("[請CC修改] delete failed", e); }
-  setTimeout(refreshDecorations, 120);
+  setTimeout(() => refreshDecorations(true), 120);
 }
 
 // ── 選字 → (小按鈕 / 自動) 輸入面板 ─────────────────────────
@@ -483,11 +488,11 @@ function onload({ extensionAPI }) {
       { id: "bubbleMode", name: "泡泡框顯示",
         description: "hover = 滑過才出（乾淨）；always = 常駐顯示",
         action: { type: "select", items: ["hover", "always"],
-          onChange: () => setTimeout(refreshDecorations, 50) } },
+          onChange: () => setTimeout(() => refreshDecorations(true), 50) } },
       { id: "tagName", name: "標記 tag",
         description: "CC 讀取用的 tag（預設 請cc修改）",
         action: { type: "input", placeholder: "請cc修改",
-          onChange: () => setTimeout(refreshDecorations, 50) } },
+          onChange: () => setTimeout(() => refreshDecorations(true), 50) } },
     ],
   });
 
@@ -503,9 +508,9 @@ function onload({ extensionAPI }) {
   });
   window.roamAlphaAPI.ui.commandPalette.addCommand({
     label: "請CC修改：重整標記",
-    callback: refreshDecorations,
+    callback: () => refreshDecorations(true),
   });
-  setTimeout(refreshDecorations, 400);
+  setTimeout(() => refreshDecorations(true), 400);
   console.log("[請CC修改] loaded");
 }
 
