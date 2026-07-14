@@ -236,6 +236,7 @@ async function deleteMark(childUid) {
 
 // ── 選字 → (小按鈕 / 自動) 輸入面板 ─────────────────────────
 function onMouseUp(e) {
+  if (e.target && e.target.closest && e.target.closest(".ccm-bubble")) return; // 點泡泡(含編輯/刪除鈕)不觸發、不關面板
   if (!active) return;                                     // 關閉時完全不動作
   if (panelEl && panelEl.contains(e.target)) return;
   if (triggerBtn && triggerBtn.contains(e.target)) return;
