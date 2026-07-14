@@ -446,9 +446,15 @@ async function copyMarksPrompt() {
     return `${i + 1}. [block ${pu}] ${m.intent}｜指令：${m.instruction || "(無)"}｜${where}\n   目前內容：${ps}`;
   });
   const text =
-    `請依 PROTOCOL v2 處理 Roam page「${pg.title}」（page uid: ${pg.uid}）的 ${rows.length} 個 #請cc修改 標記。\n` +
-    `鐵律：不得修改任何原稿 block、不得刪標記。先完整讀整頁掌握上下文，再逐處依「意圖」回寫提案（潤=【提案】替換文／接=【提案】草稿／查議=【備註】結果＋來源），把該標記 tag 由 #請cc修改 改成 #cc提案；最後在 chat 回一份對帳清單。\n\n` +
-    `共 ${rows.length} 處：\n` + lines.join("\n");
+    `【請CC修改 · 改稿任務】\n` +
+    `行為法典（第一步務必讀）：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md\n` +
+    `對象：Roam page「${pg.title}」（page uid: ${pg.uid}）\n\n` +
+    `步驟：\n` +
+    `1. 讀上面 PROTOCOL.md（鐵律：不得改任何原稿 block、不得刪標記、只回寫提案）。\n` +
+    `2. 用 Roam MCP 讀整頁 ${pg.uid} 掌握上下文與背景（頁內若有「素材/背景」區一併讀）；要更多來龍去脈可查 Supabase handovers 最近幾筆（找這篇的紀錄）。\n` +
+    `3. 逐處依「意圖」回寫提案：潤=【提案】替換文／接=【提案】草稿／查議=【備註】結果＋來源；把標記 tag 由 #請cc修改 改成 #cc提案。原稿一字不動。\n` +
+    `4. 在 chat 回一份對帳清單（一處一行）。\n\n` +
+    `共 ${rows.length} 個待處理標記：\n` + lines.join("\n");
   try { await navigator.clipboard.writeText(text); toast(`已複製本頁 ${rows.length} 個待處理標記給 CC`); }
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
 }
