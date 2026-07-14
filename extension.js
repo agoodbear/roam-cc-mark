@@ -219,7 +219,16 @@ function clearDecorations() {
     e.classList.remove("ccm-block-flag", "ccm-block-flag-review");
     delete e.dataset.ccmChild; delete e.dataset.state;
   });
+  document.querySelectorAll(".ccm-mark-hidden").forEach((e) => e.classList.remove("ccm-mark-hidden"));
   overlayEl.innerHTML = "";
+}
+
+// 把「標記 child block」那一列藏起來（只藏顯示、資料不動；inline 手打 tag 的不藏，那是正文）
+function hideChildBlock(childUid) {
+  const el = findBlockTextEl(childUid);
+  if (!el) return;
+  const c = el.closest(".roam-block-container") || el.closest(".rm-block");
+  if (c) c.classList.add("ccm-mark-hidden");
 }
 
 function refreshDecorations(force) {
@@ -257,7 +266,7 @@ function refreshDecorations(force) {
 
   applying = true;
   clearDecorations();
-  for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); }
+  for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) hideChildBlock(m.childUid); }
   updatePill(todoCount, reviewCount);
   setTimeout(() => { applying = false; }, 0);
 }
@@ -614,6 +623,7 @@ function injectStyle() {
   .ccm-underline-review:hover{background:#bff0d4;}
   .ccm-block-flag{box-shadow:-3px 0 0 #f0a020;background:#fffaf0;}
   .ccm-block-flag-review{box-shadow:-3px 0 0 #22a06b;background:#f0fbf5;}
+  .ccm-mark-hidden{display:none !important;}
   .ccm-overlay{position:absolute;top:0;left:0;width:0;height:0;z-index:9990;pointer-events:none;}
   .ccm-bubble{position:absolute;width:max-content;max-width:280px;background:#fff;border:1px solid #f0c453;border-radius:9px;
     box-shadow:0 6px 20px rgba(16,22,26,.18);padding:7px 11px 8px;font-size:12.5px;line-height:1.5;color:#33404d;
