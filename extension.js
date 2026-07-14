@@ -21,7 +21,7 @@ const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接
 
 let api;
 let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
-let observer, debounceTimer, applying = false, active = false, navIdx = -1;
+let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null;
 let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrence}],label} | edit:{mode,childUid,quote,occurrence}
 let panelIntent = "潤";
 let scrollBound = null, keyBound = null;
@@ -60,21 +60,29 @@ function offsetInContainer(container, node, nodeOffset) {
 // 解析標記 block 字串
 function parseMark(s) {
   const review = /#cc提案|#\[\[cc提案\]\]/.test(s);
-  const insMatch = s.match(/【指令】([\s\S]*?)(?:【第\d+處】|【原文】|【提案】|【備註】|$)/);
+  // 照欄位邊界切段（不靠 「」 當界）→ 原文/提案內含對話引號「我不要住院」也不會被截斷
+  const seg = (marker, ...nexts) => {
+    const st = s.indexOf(marker);
+    if (st === -1) return null;
+    const from = st + marker.length;
+    let end = s.length;
+    for (const nm of nexts) { const i = s.indexOf(nm, from); if (i !== -1 && i < end) end = i; }
+    return s.slice(from, end).trim();
+  };
+  const unquote = (v) => (v == null ? "" : v.replace(/^「/, "").replace(/」$/, ""));
   let intent = "潤", detail = "";
-  if (insMatch) {
-    const raw = insMatch[1].trim();
-    const im = raw.match(/^(潤|接|查|議)\s*[:：]?\s*([\s\S]*)$/);
-    if (im) { intent = im[1]; detail = im[2].trim(); } else detail = raw;
+  const insRaw = seg("【指令】", "【第", "【原文】", "【提案】", "【備註】");
+  if (insRaw != null) {
+    const im = insRaw.match(/^(潤|接|查|議)\s*[:：]?\s*([\s\S]*)$/);
+    if (im) { intent = im[1]; detail = im[2].trim(); } else detail = insRaw;
   }
   const occ = s.match(/【第(\d+)處】/);
-  const q = s.match(/【原文】\s*「([\s\S]*?)」/);
-  const prop = s.match(/【提案】\s*「([\s\S]*?)」/);
-  const note = s.match(/【備註】([\s\S]*?)(?:【原文】|【提案】|$)/);
   return {
     state: review ? "review" : "todo", intent, instruction: detail,
     occurrence: occ ? parseInt(occ[1], 10) : 1,
-    quote: q ? q[1] : "", proposal: prop ? prop[1] : "", note: note ? note[1].trim() : "",
+    quote: unquote(seg("【原文】", "【提案】", "【備註】")),
+    proposal: unquote(seg("【提案】", "【備註】")),
+    note: seg("【備註】") || "",
   };
 }
 function markString(intent, instruction, quote, occurrence) {
@@ -159,28 +167,33 @@ function decorateMark(el, m) {
   attachBubble(anchor, m);
 }
 
+function buildBubbleDOM(m, anchorEl) {
+  const b = document.createElement("div");
+  b.className = "ccm-bubble" + (m.state === "review" ? " review" : "") + (m.inline ? " inline" : "");
+  if (m.inline) {
+    b.innerHTML = `<div class="ccm-lbl">定稿・你已改</div><div class="ccm-ins"></div>` +
+      `<div class="ccm-bactions"><button class="ccm-acc">🧹 清掉標記</button></div>`;
+    b.querySelector(".ccm-ins").textContent = m.instruction;
+    b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); clearInlineTag(m); };
+  } else if (m.state === "review") {
+    const body = m.proposal ? ("→「" + m.proposal + "」") : (m.note || "(無內容)");
+    b.innerHTML = `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-ins"></div>` +
+      `<div class="ccm-bactions"><button class="ccm-acc">✅ 接受</button><button class="ccm-ret">↩ 退回</button></div>`;
+    b.querySelector(".ccm-ins").textContent = body;
+    b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); acceptMark(m); };
+    b.querySelector(".ccm-ret").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
+  } else {
+    b.innerHTML = `<div class="ccm-lbl">${m.intent}・待CC</div><div class="ccm-ins"></div>` +
+      `<div class="ccm-bactions"><button class="ccm-bedit">編輯</button><button class="ccm-bdel">刪除</button></div>`;
+    b.querySelector(".ccm-ins").textContent = m.instruction || "(無指令)";
+    b.querySelector(".ccm-bedit").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
+    b.querySelector(".ccm-bdel").onclick = (e) => { e.stopPropagation(); deleteMark(m.childUid); };
+  }
+  return b;
+}
 function attachBubble(anchorEl, m) {
-  const makeBubble = () => {
-    const b = document.createElement("div");
-    b.className = "ccm-bubble" + (m.state === "review" ? " review" : "");
-    if (m.state === "review") {
-      const body = m.proposal ? ("→「" + m.proposal + "」") : (m.note || "(無內容)");
-      b.innerHTML = `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-ins"></div>` +
-        `<div class="ccm-bactions"><button class="ccm-acc">✅ 接受</button><button class="ccm-ret">↩ 退回</button></div>`;
-      b.querySelector(".ccm-ins").textContent = body;
-      b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); acceptMark(m); };
-      b.querySelector(".ccm-ret").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
-    } else {
-      b.innerHTML = `<div class="ccm-lbl">${m.intent}・待CC</div><div class="ccm-ins"></div>` +
-        `<div class="ccm-bactions"><button class="ccm-bedit">編輯</button><button class="ccm-bdel">刪除</button></div>`;
-      b.querySelector(".ccm-ins").textContent = m.instruction || "(無指令)";
-      b.querySelector(".ccm-bedit").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
-      b.querySelector(".ccm-bdel").onclick = (e) => { e.stopPropagation(); deleteMark(m.childUid); };
-    }
-    overlayEl.appendChild(b);
-    positionBubble(b, anchorEl);
-    return b;
-  };
+  anchorEl.__ccmMark = m;   // 供 ⌥↓/⌥Enter 鍵盤審稿取用
+  const makeBubble = () => { const b = buildBubbleDOM(m, anchorEl); overlayEl.appendChild(b); positionBubble(b, anchorEl); return b; };
   let b = null, hideT = null;
   const cancelHide = () => { if (hideT) { clearTimeout(hideT); hideT = null; } };
   const scheduleHide = () => { cancelHide(); hideT = setTimeout(() => { if (b) { b.remove(); b = null; } }, 450); };
@@ -217,7 +230,16 @@ function refreshDecorations(force) {
   const marks = [];
   for (const [cu, pu, s, pg, ps] of rows) {
     const m = parseMark(s);
-    m.childUid = cu; m.parentUid = pu; m.parentStr = ps; m.pageUid = pg;
+    m.childUid = cu; m.pageUid = pg;
+    // 行內手打 tag（正文＋#請cc修改 在同一 block、tag 不在開頭）＝Bear 已定稿、只通知 CC 同步
+    const inlineTag = !/^\s*#(?:請cc修改|cc提案|\[\[(?:請cc修改|cc提案)\]\])/.test(s);
+    if (inlineTag) {
+      m.inline = true; m.intent = "定稿";
+      m.parentUid = cu; m.parentStr = s;   // 原稿就是 block 自己，畫在自己身上
+      m.instruction = s.replace(/^[\s\S]*?#(?:請cc修改|\[\[請cc修改\]\]|cc提案|\[\[cc提案\]\])\s*/, "").trim() || "你已直接修改此段，CC 會同步回 Hugo";
+    } else {
+      m.parentUid = pu; m.parentStr = ps;
+    }
     marks.push(m);
   }
   const desired = marks.filter((m) => findBlockTextEl(m.parentUid));
@@ -296,6 +318,17 @@ async function acceptMark(m) {
       toast("已標記完成");
     }
   } catch (e) { console.warn("[請CC修改] accept failed", e); toast("套用失敗（見 Console）"); }
+  setTimeout(() => refreshDecorations(true), 120);
+}
+
+// 🧹 清掉行內手打的 #請cc修改（Bear 已定稿：只移除 tag＋其後通知字，正文一字不動）
+async function clearInlineTag(m) {
+  try {
+    const cur = blockString(m.childUid);
+    const next = cur.replace(/\s*#(?:請cc修改|\[\[請cc修改\]\]|cc提案|\[\[cc提案\]\])\b[^\n]*$/, "").trim();
+    await window.roamAlphaAPI.updateBlock({ block: { uid: m.childUid, string: next } });
+    toast("已清掉行內標記（正文保留）");
+  } catch (e) { console.warn("[請CC修改] clearInlineTag failed", e); toast("清除失敗（見 Console）"); }
   setTimeout(() => refreshDecorations(true), 120);
 }
 
@@ -382,6 +415,16 @@ function onKeyDown(e) {
     e.preventDefault();
     if (navEl && navEl.style.display === "none") { navEl.style.display = "flex"; navIdx = -1; }
     navGo(e.code === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  // ⌥Enter＝接受目前導覽到的待審標記並自動跳下一個；⌥R＝退回
+  if (e.altKey && e.code === "Enter" && !e.ctrlKey && !e.metaKey) {
+    if (navCurrent && navCurrent.state === "review") { e.preventDefault(); acceptMark(navCurrent); setTimeout(() => navGo(1), 280); }
+    return;
+  }
+  if (e.altKey && e.code === "KeyR" && !e.ctrlKey && !e.metaKey) {
+    if (navCurrent && navCurrent.state === "review") { e.preventDefault(); openEdit(navCurrent, findBlockTextEl(navCurrent.parentUid)); }
+    return;
   }
 }
 
@@ -443,16 +486,16 @@ async function copyMarksPrompt() {
   const lines = rows.map(([cu, cs, pu, ps], i) => {
     const m = parseMark(cs);
     const where = m.quote ? `原文第${m.occurrence}處「${m.quote}」` : "整段";
-    return `${i + 1}. [block ${pu}] ${m.intent}｜指令：${m.instruction || "(無)"}｜${where}\n   目前內容：${ps}`;
+    return `${i + 1}. [原稿 ${pu} · 標記 ${cu}] ${m.intent}｜指令：${m.instruction || "(無)"}｜${where}\n   目前內容：${ps}`;
   });
   const text =
     `【請CC修改 · 改稿任務】\n` +
-    `行為法典（第一步務必讀）：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md\n` +
+    `行為法典（第一步務必讀）：本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）\n` +
     `對象：Roam page「${pg.title}」（page uid: ${pg.uid}）\n\n` +
     `步驟：\n` +
     `1. 讀上面 PROTOCOL.md（鐵律：不得改任何原稿 block、不得刪標記、只回寫提案）。\n` +
     `2. 用 Roam MCP 讀整頁 ${pg.uid} 掌握上下文與背景（頁內若有「素材/背景」區一併讀）；要更多來龍去脈可查 Supabase handovers 最近幾筆（找這篇的紀錄）。\n` +
-    `3. 逐處依「意圖」回寫提案：潤=【提案】替換文／接=【提案】草稿／查議=【備註】結果＋來源；把標記 tag 由 #請cc修改 改成 #cc提案。原稿一字不動。\n` +
+    `3. 逐處依「意圖」在該『標記 block』（uid 見每行的「標記」）回寫：潤=【提案】替換文／接=【提案】草稿／查議=【備註】結果＋來源，並把該標記 tag 由 #請cc修改 改成 #cc提案。原稿 block 一字不動。\n` +
     `4. 在 chat 回一份對帳清單（一處一行）。\n\n` +
     `共 ${rows.length} 個待處理標記：\n` + lines.join("\n");
   try { await navigator.clipboard.writeText(text); toast(`已複製本頁 ${rows.length} 個待處理標記給 CC`); }
@@ -536,14 +579,22 @@ function navMarks() {
   els.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
   return els;
 }
+function showNavBubble(anchorEl, m) {
+  if (navBubble) { navBubble.remove(); navBubble = null; }
+  const b = buildBubbleDOM(m, anchorEl);
+  overlayEl.appendChild(b); positionBubble(b, anchorEl);
+  navBubble = b;
+}
 function navGo(dir) {
   const els = navMarks();
-  if (!els.length) { updateNavLabel(0); return; }
+  if (!els.length) { updateNavLabel(0); navCurrent = null; if (navBubble) { navBubble.remove(); navBubble = null; } return; }
   navIdx = (navIdx + dir + els.length) % els.length;
   const el = els[navIdx];
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   const prev = el.style.background; el.style.background = "#ffd54a";
   setTimeout(() => { el.style.background = prev; }, 900);
+  navCurrent = el.__ccmMark || null;
+  if (navCurrent) setTimeout(() => { if (document.body.contains(el)) showNavBubble(el, navCurrent); }, 340); // 等捲動到位再定位泡泡
   updateNavLabel(els.length);
 }
 function updateNavLabel(total) { const lbl = navEl && navEl.querySelector(".ccm-nav-label"); if (lbl) lbl.textContent = total ? (navIdx + 1) + "/" + total : "0"; }
