@@ -13,8 +13,8 @@
 
 const DEFAULTS = { tagName: "請cc修改", bubbleMode: "hover", triggerMode: "auto" };
 let api;                       // extensionAPI
-let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn;
-let observer, debounceTimer, applying = false, active = false;
+let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
+let observer, debounceTimer, applying = false, active = false, navIdx = -1;
 let alwaysBubbles = [];        // 常駐模式下需要重定位的泡泡
 let pending = null;            // {mode?, parentUid?, childUid?, quote}
 let scrollBound = null;
@@ -379,11 +379,19 @@ function buildUI() {
   pillEl = document.createElement("div");
   pillEl.className = "ccm-pill";
   pillEl.style.display = "none";
-  pillEl.onclick = () => {
-    const first = document.querySelector(".ccm-underline, .ccm-block-flag");
-    if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
-  };
+  pillEl.onclick = () => toggleNav();
   document.body.appendChild(pillEl);
+
+  navEl = document.createElement("div");
+  navEl.className = "ccm-nav";
+  navEl.style.display = "none";
+  navEl.innerHTML =
+    '<button class="ccm-nav-prev" title="上一個">▲</button>' +
+    '<span class="ccm-nav-label">–</span>' +
+    '<button class="ccm-nav-next" title="下一個">▼</button>';
+  navEl.querySelector(".ccm-nav-prev").onclick = () => navGo(-1);
+  navEl.querySelector(".ccm-nav-next").onclick = () => navGo(1);
+  document.body.appendChild(navEl);
 
   toggleBtn = document.createElement("div");
   toggleBtn.className = "ccm-toggle";
@@ -395,9 +403,38 @@ function buildUI() {
 
 function updatePill(total, visible) {
   if (!pillEl) return;
-  if (!total) { pillEl.style.display = "none"; return; }
+  if (!total) { pillEl.style.display = "none"; if (navEl) navEl.style.display = "none"; return; }
   pillEl.style.display = "block";
   pillEl.innerHTML = `📝 待改 <b>${total}</b>` + (visible < total ? `　(本頁 ${visible})` : "");
+}
+
+// ── 上下導覽（在本頁標記間跳） ──────────────────────────────
+function navMarks() {
+  const els = Array.from(document.querySelectorAll(".ccm-underline, .ccm-block-flag"));
+  els.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+  return els;
+}
+function navGo(dir) {
+  const els = navMarks();
+  if (!els.length) { updateNavLabel(0); return; }
+  navIdx = (navIdx + dir + els.length) % els.length;
+  const el = els[navIdx];
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  const prev = el.style.background;
+  el.style.background = "#ffd54a";
+  setTimeout(() => { el.style.background = prev; }, 900);
+  updateNavLabel(els.length);
+}
+function updateNavLabel(total) {
+  const lbl = navEl && navEl.querySelector(".ccm-nav-label");
+  if (lbl) lbl.textContent = total ? (navIdx + 1) + "/" + total : "0";
+}
+function toggleNav() {
+  if (!navEl) return;
+  if (navEl.style.display !== "none") { navEl.style.display = "none"; return; }
+  navEl.style.display = "flex";
+  navIdx = -1;
+  navGo(1);
 }
 
 // ── 開關 ─────────────────────────────────────────────────────
@@ -459,6 +496,11 @@ function injectStyle() {
   .ccm-pill{position:fixed;right:18px;bottom:58px;z-index:9994;background:#fff;border:1px solid #f6d67a;color:#92660b;
     font-size:12.5px;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;}
   .ccm-pill b{color:#c47f0a;}
+  .ccm-nav{position:fixed;right:18px;bottom:98px;z-index:9994;display:flex;align-items:center;gap:6px;
+    background:#fff;border:1px solid #d5dbe2;border-radius:999px;padding:4px 8px;box-shadow:0 4px 14px rgba(16,22,26,.16);}
+  .ccm-nav button{width:26px;height:26px;border:none;border-radius:50%;background:#eef2f6;color:#37424d;cursor:pointer;font-size:12px;line-height:1;}
+  .ccm-nav button:hover{background:#2b7de0;color:#fff;}
+  .ccm-nav-label{font-size:12px;font-weight:700;color:#58636e;min-width:34px;text-align:center;}
   .ccm-toggle{position:fixed;right:18px;bottom:18px;z-index:9994;background:#e9edf1;border:1px solid #d5dbe2;color:#58636e;
     font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);
     cursor:pointer;user-select:none;transition:background .12s;}
@@ -523,7 +565,7 @@ function onunload() {
     window.removeEventListener("resize", scrollBound);
   }
   clearDecorations();
-  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn].forEach((e) => e && e.remove());
+  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl].forEach((e) => e && e.remove());
   try {
     window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: "請CC修改：開關標記模式" });
     window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: "請CC修改：重整標記" });
