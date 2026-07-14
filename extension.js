@@ -209,15 +209,17 @@ function refreshDecorations(force) {
   const rows = queryMarks();
   const curPage = currentPage();
   const pageUid = curPage && curPage.uid;
-  let todoCount = 0, reviewCount = 0;
   const marks = [];
   for (const [cu, pu, s, pg, ps] of rows) {
     const m = parseMark(s);
     m.childUid = cu; m.parentUid = pu; m.parentStr = ps; m.pageUid = pg;
-    if (pg === pageUid) { if (m.state === "review") reviewCount++; else todoCount++; }
     marks.push(m);
   }
   const desired = marks.filter((m) => findBlockTextEl(m.parentUid));
+  // 本頁計數：優先用 page uid 算全頁；抓不到頁就退回「畫面上的標記數」→ 有標記就一定顯示膠囊
+  const counted = pageUid ? marks.filter((m) => m.pageUid === pageUid) : desired;
+  const todoCount = counted.filter((m) => m.state === "todo").length;
+  const reviewCount = counted.filter((m) => m.state === "review").length;
   const sig = desired.map((m) => m.childUid + ":" + m.state).sort().join("|");
   const cur = [];
   document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review")
