@@ -23,6 +23,7 @@ let api;
 let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
 let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null;
 let hoverBubble = null, hoverAnchor = null, hoverHideT = null;   // 泡泡 singleton：全畫面同時只留一顆
+let pinnedBubble = null;   // 點一下釘住的泡泡（釘住時 hover 停用，可安穩移去按 ✅/↩）
 let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrence}],label} | edit:{mode,childUid,quote,occurrence}
 let panelIntent = "潤";
 let scrollBound = null, keyBound = null, mdBound = null;
@@ -164,6 +165,10 @@ function decorateMark(el, m) {
     anchor = el;
   } else if (m.state === "todo") {
     anchor.addEventListener("click", (e) => { e.stopPropagation(); openEdit(m, anchor); });
+  } else if (m.state === "review") {
+    // 綠色待審：點一下釘住提案卡（釘住時 hover 停用，滑鼠可安穩移去按 ✅/↩，不被相鄰標記搶走）
+    anchor.title = "點一下打開提案卡（可穩定按 ✅／↩）";
+    anchor.addEventListener("mousedown", (e) => { e.preventDefault(); e.stopPropagation(); pinBubble(anchor, m); });
   }
   attachBubble(anchor, m);
 }
@@ -177,10 +182,26 @@ function buildBubbleDOM(m, anchorEl) {
     b.querySelector(".ccm-ins").textContent = m.instruction;
     b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); clearInlineTag(m); };
   } else if (m.state === "review") {
-    const body = m.proposal ? ("→「" + m.proposal + "」") : (m.note || "(無內容)");
-    b.innerHTML = `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-ins"></div>` +
-      `<div class="ccm-bactions"><button class="ccm-acc">✅ 接受</button><button class="ccm-ret">↩ 退回</button></div>`;
-    b.querySelector(".ccm-ins").textContent = body;
+    const isNote = m.intent === "查" || m.intent === "議";
+    b.innerHTML =
+      `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-diff"></div>` +
+      `<div class="ccm-bactions"><button class="ccm-acc">${isNote ? "✅ 完成" : "✅ 接受"}</button><button class="ccm-ret">↩ 退回</button></div>`;
+    const diff = b.querySelector(".ccm-diff");
+    const row = (cls, tag, text) => {
+      const d = document.createElement("div"); d.className = "ccm-drow " + cls;
+      const t = document.createElement("span"); t.className = "ccm-dtag"; t.textContent = tag;
+      const c = document.createElement("span"); c.className = "ccm-dtext"; c.textContent = text;
+      d.appendChild(t); d.appendChild(c); return d;
+    };
+    if (m.intent === "潤" && m.proposal) {
+      if (m.quote) diff.appendChild(row("old", "原文", m.quote));
+      diff.appendChild(row("new", "改為", m.proposal));
+    } else if (m.intent === "接" && m.proposal) {
+      diff.appendChild(row("new", "新增", m.proposal));
+    } else {   // 查／議：只給意見，不改字
+      if (m.quote) diff.appendChild(row("old", "原文", m.quote));
+      diff.appendChild(row("note", m.intent === "查" ? "查證" : "建議", m.note || m.proposal || "(無內容)"));
+    }
     b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); acceptMark(m); };
     b.querySelector(".ccm-ret").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
   } else {
@@ -199,6 +220,7 @@ function attachBubble(anchorEl, m) {
   anchorEl.addEventListener("mouseleave", scheduleHoverHide);
 }
 function showHoverBubble(anchorEl, m) {
+  if (pinnedBubble) return;   // 有釘住的泡泡時，hover 完全停用（避免相鄰標記搶焦點）
   if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
   if (hoverBubble && hoverAnchor === anchorEl) return;   // 已經是這顆，不重畫
   removeHoverBubble();   // singleton：先收掉任何既有泡泡（含相鄰那顆）
@@ -216,6 +238,24 @@ function scheduleHoverHide() {
 function removeHoverBubble() {
   if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
   if (hoverBubble) { hoverBubble.remove(); hoverBubble = null; hoverAnchor = null; }
+}
+// 點一下綠色標記＝把提案卡「釘」在畫面上（放 body、不隨 overlay 重畫消失）；釘住期間 hover 停用
+function pinBubble(anchorEl, m) {
+  unpinBubble(); removeHoverBubble(); hideNavBubble();
+  const b = buildBubbleDOM(m, anchorEl);
+  b.classList.add("ccm-pinned"); b.__ccmChild = m.childUid;
+  document.body.appendChild(b); positionBubble(b, anchorEl);
+  pinnedBubble = b;
+}
+function unpinBubble() { if (pinnedBubble) { pinnedBubble.remove(); pinnedBubble = null; } }
+// 重畫後：釘住的標記若已消失就收掉，否則重新對位（原稿在編輯時版面會跳）
+function syncPinned(desired) {
+  if (!pinnedBubble) return;
+  const cid = pinnedBubble.__ccmChild;
+  if (!desired.some((x) => x.childUid === cid)) { unpinBubble(); return; }
+  const a = document.querySelector('.ccm-underline-review[data-child="' + cid + '"]') ||
+            document.querySelector('.ccm-block-flag-review[data-ccm-child="' + cid + '"]');
+  if (a) positionBubble(pinnedBubble, a);
 }
 
 function positionBubble(b, anchorEl) {
@@ -283,12 +323,13 @@ function refreshDecorations(force) {
   document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review")
     .forEach((e) => cur.push((e.dataset.child || e.dataset.ccmChild) + ":" + (e.dataset.state || "")));
   const same = sig === cur.sort().join("|");
-  if (!force && same) { updatePill(todoCount, reviewCount); return; }
+  if (!force && same) { updatePill(todoCount, reviewCount); syncPinned(desired); return; }
 
   applying = true;
   clearDecorations();
   for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) hideChildBlock(m.childUid); }
   updatePill(todoCount, reviewCount);
+  syncPinned(desired);
   setTimeout(() => { applying = false; }, 0);
 }
 const debouncedRefresh = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(refreshDecorations, 250); };
@@ -329,6 +370,7 @@ function siblingAfter(uid) {
 }
 // ✅ 接受＝Bear 把提案套進原稿（唯一讓字進原稿的動作）
 async function acceptMark(m) {
+  unpinBubble();
   try {
     if (m.intent === "潤" && m.proposal) {
       const curStr = blockString(m.parentUid);
@@ -437,6 +479,7 @@ function keyboardAnchorXY() {
   return { x: window.scrollX + window.innerWidth / 2, y: window.scrollY + 200 };
 }
 function onKeyDown(e) {
+  if (e.key === "Escape" && (pinnedBubble || navBubble)) { unpinBubble(); hideNavBubble(); return; }
   if (e.altKey && e.code === "KeyM" && !e.ctrlKey && !e.metaKey) {
     e.preventDefault(); const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true); return;
   }
@@ -460,6 +503,7 @@ function onKeyDown(e) {
 
 // ── 面板 ─────────────────────────────────────────────────────
 function openEdit(m, anchorEl) {
+  unpinBubble();
   pending = { mode: "edit", childUid: m.childUid, quote: m.quote, occurrence: m.occurrence };
   panelIntent = m.intent;
   const el = anchorEl || findBlockTextEl(m.parentUid);
@@ -654,6 +698,20 @@ function injectStyle() {
   .ccm-bubble .ccm-lbl{white-space:nowrap;font-size:10.5px;font-weight:800;color:#b5820c;margin-bottom:2px;}
   .ccm-bubble.review .ccm-lbl{color:#1a7f54;}
   .ccm-bubble .ccm-ins{font-weight:600;white-space:normal;}
+  .ccm-bubble.review{max-width:340px;}
+  .ccm-bubble.ccm-pinned{box-shadow:0 10px 30px rgba(16,22,26,.3);outline:2px solid rgba(34,160,107,.4);}
+  .ccm-diff{display:flex;flex-direction:column;margin:3px 0 2px;border:1px solid #e6ebf0;border-radius:7px;overflow:hidden;}
+  .ccm-drow{display:flex;gap:6px;padding:5px 8px;font-size:12.5px;line-height:1.5;white-space:normal;}
+  .ccm-drow+.ccm-drow{border-top:1px dashed #d8dee5;}
+  .ccm-drow.old{background:#fdecec;}
+  .ccm-drow.new{background:#e8f7ef;}
+  .ccm-drow.note{background:#fff8e6;}
+  .ccm-dtag{flex:none;font-size:10px;font-weight:800;padding:1px 5px;border-radius:5px;height:fit-content;margin-top:1px;}
+  .ccm-drow.old .ccm-dtag{background:#f6c9cb;color:#a4282d;}
+  .ccm-drow.old .ccm-dtext{color:#8a5a5c;text-decoration:line-through;text-decoration-color:#dd9a9c;}
+  .ccm-drow.new .ccm-dtag{background:#b7ebcf;color:#137a4e;}
+  .ccm-drow.note .ccm-dtag{background:#f4dfa0;color:#8a6d1c;}
+  .ccm-dtext{color:#33404d;}
   .ccm-bubble::after{content:"";position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);border:7px solid transparent;border-top-color:#fff;filter:drop-shadow(0 1px 0 #f0c453);}
   .ccm-bubble.review::after{filter:drop-shadow(0 1px 0 #8ad9b3);}
   .ccm-bubble.ccm-below{transform:translate(-50%,0);}
@@ -719,7 +777,10 @@ function onload({ extensionAPI }) {
   updateToggle();
   document.addEventListener("mouseup", onMouseUp);
   keyBound = onKeyDown; document.addEventListener("keydown", keyBound, true);
-  mdBound = (e) => { if (navBubble && !navBubble.contains(e.target)) hideNavBubble(); };
+  mdBound = (e) => {
+    if (navBubble && !navBubble.contains(e.target)) hideNavBubble();
+    if (pinnedBubble && !pinnedBubble.contains(e.target)) unpinBubble();
+  };
   document.addEventListener("mousedown", mdBound, true);
   startObserver();
   const cmds = [
@@ -740,6 +801,7 @@ function onunload() {
   if (mdBound) document.removeEventListener("mousedown", mdBound, true);
   if (observer) observer.disconnect();
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
+  unpinBubble();
   clearDecorations();
   [styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl].forEach((e) => e && e.remove());
   const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：重整標記"];
