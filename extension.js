@@ -216,8 +216,9 @@ function refreshDecorations(force) {
     marks.push(m);
   }
   const desired = marks.filter((m) => findBlockTextEl(m.parentUid));
-  // 本頁計數：優先用 page uid 算全頁；抓不到頁就退回「畫面上的標記數」→ 有標記就一定顯示膠囊
-  const counted = pageUid ? marks.filter((m) => m.pageUid === pageUid) : desired;
+  // 本頁計數：頁 uid 對得上就用全頁數；對不上/偵測不到就退回「畫面上的底線數」→ 只要有底線就一定顯示膠囊
+  const pageMatched = pageUid ? marks.filter((m) => m.pageUid === pageUid) : [];
+  const counted = pageMatched.length ? pageMatched : desired;
   const todoCount = counted.filter((m) => m.state === "todo").length;
   const reviewCount = counted.filter((m) => m.state === "review").length;
   const sig = desired.map((m) => m.childUid + ":" + m.state).sort().join("|");
