@@ -22,6 +22,7 @@ const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接
 let api;
 let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
 let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null;
+let hoverBubble = null, hoverAnchor = null, hoverHideT = null;   // 泡泡 singleton：全畫面同時只留一顆
 let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrence}],label} | edit:{mode,childUid,quote,occurrence}
 let panelIntent = "潤";
 let scrollBound = null, keyBound = null, mdBound = null;
@@ -191,21 +192,39 @@ function buildBubbleDOM(m, anchorEl) {
   }
   return b;
 }
+// 泡泡永遠只留一顆（singleton）：滑到新標記＝舊泡泡即刻收掉，徹底避免上下相鄰標記兩顆疊在一起
 function attachBubble(anchorEl, m) {
   anchorEl.__ccmMark = m;   // 供 ⌥↓/⌥Enter 鍵盤審稿取用
-  const makeBubble = () => { const b = buildBubbleDOM(m, anchorEl); overlayEl.appendChild(b); positionBubble(b, anchorEl); return b; };
-  let b = null, hideT = null;
-  const cancelHide = () => { if (hideT) { clearTimeout(hideT); hideT = null; } };
-  const scheduleHide = () => { cancelHide(); hideT = setTimeout(() => { if (b) { b.remove(); b = null; } }, 450); };
-  const show = () => { cancelHide(); if (!b) { b = makeBubble(); b.addEventListener("mouseenter", cancelHide); b.addEventListener("mouseleave", scheduleHide); } };
-  anchorEl.addEventListener("mouseenter", show);
-  anchorEl.addEventListener("mouseleave", scheduleHide);
+  anchorEl.addEventListener("mouseenter", () => showHoverBubble(anchorEl, m));
+  anchorEl.addEventListener("mouseleave", scheduleHoverHide);
+}
+function showHoverBubble(anchorEl, m) {
+  if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
+  if (hoverBubble && hoverAnchor === anchorEl) return;   // 已經是這顆，不重畫
+  removeHoverBubble();   // singleton：先收掉任何既有泡泡（含相鄰那顆）
+  hideNavBubble();
+  const b = buildBubbleDOM(m, anchorEl);
+  overlayEl.appendChild(b); positionBubble(b, anchorEl);
+  b.addEventListener("mouseenter", () => { if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; } });
+  b.addEventListener("mouseleave", scheduleHoverHide);
+  hoverBubble = b; hoverAnchor = anchorEl;
+}
+function scheduleHoverHide() {
+  if (hoverHideT) clearTimeout(hoverHideT);
+  hoverHideT = setTimeout(removeHoverBubble, 300);
+}
+function removeHoverBubble() {
+  if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
+  if (hoverBubble) { hoverBubble.remove(); hoverBubble = null; hoverAnchor = null; }
 }
 
 function positionBubble(b, anchorEl) {
   const r = anchorEl.getBoundingClientRect();
   b.style.left = (r.left + window.scrollX + r.width / 2) + "px";
-  b.style.top = (r.top + window.scrollY - 6) + "px";
+  // 預設在文字上方；上方空間不足（貼近視窗頂）就翻到下方，避免泡泡被切掉
+  const bh = b.offsetHeight || 96;
+  if (r.top - bh - 10 < 8) { b.classList.add("ccm-below"); b.style.top = (r.bottom + window.scrollY + 6) + "px"; }
+  else { b.classList.remove("ccm-below"); b.style.top = (r.top + window.scrollY - 6) + "px"; }
 }
 
 // ── refresh ─────────────────────────────────────────────────
@@ -221,6 +240,8 @@ function clearDecorations() {
   });
   document.querySelectorAll(".ccm-mark-hidden").forEach((e) => e.classList.remove("ccm-mark-hidden"));
   overlayEl.innerHTML = "";
+  hoverBubble = null; hoverAnchor = null; navBubble = null;
+  if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
 }
 
 // 把「標記 child block」那一列藏起來（只藏顯示、資料不動；inline 手打 tag 的不藏，那是正文）
@@ -590,7 +611,7 @@ function navMarks() {
 }
 function hideNavBubble() { if (navBubble) { navBubble.remove(); navBubble = null; } }
 function showNavBubble(anchorEl, m) {
-  hideNavBubble();
+  hideNavBubble(); removeHoverBubble();   // singleton：導覽泡泡出現時也收掉 hover 泡泡
   const b = buildBubbleDOM(m, anchorEl);
   overlayEl.appendChild(b); positionBubble(b, anchorEl);
   navBubble = b;
@@ -635,6 +656,9 @@ function injectStyle() {
   .ccm-bubble .ccm-ins{font-weight:600;white-space:normal;}
   .ccm-bubble::after{content:"";position:absolute;left:50%;bottom:-7px;transform:translateX(-50%);border:7px solid transparent;border-top-color:#fff;filter:drop-shadow(0 1px 0 #f0c453);}
   .ccm-bubble.review::after{filter:drop-shadow(0 1px 0 #8ad9b3);}
+  .ccm-bubble.ccm-below{transform:translate(-50%,0);}
+  .ccm-bubble.ccm-below::after{top:-7px;bottom:auto;border-top-color:transparent;border-bottom-color:#fff;filter:drop-shadow(0 -1px 0 #f0c453);}
+  .ccm-bubble.review.ccm-below::after{border-bottom-color:#fff;filter:drop-shadow(0 -1px 0 #8ad9b3);}
   .ccm-bubble .ccm-bactions{display:flex;gap:6px;margin-top:7px;}
   .ccm-bubble .ccm-bactions button{font-size:11px;cursor:pointer;border-radius:6px;padding:3px 11px;border:1px solid transparent;font-weight:700;}
   .ccm-bedit,.ccm-acc{background:#2b7de0;color:#fff;}
