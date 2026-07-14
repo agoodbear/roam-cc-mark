@@ -183,11 +183,16 @@ function buildBubbleDOM(m, anchorEl) {
     b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); clearInlineTag(m); };
   } else if (m.state === "review") {
     const isNote = m.intent === "查" || m.intent === "議";
-    b.innerHTML =
-      `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-diff"></div>` +
-      `<div class="ccm-bactions"><button class="ccm-acc">${isNote ? "✅ 完成" : "✅ 接受"}</button>` +
-      (isNote ? `<button class="ccm-improve" title="轉成待處理，交給 CC 把來源/建議寫進這句（要再等 CC 一趟）">✎ 交CC改寫</button>` : "") +
-      `<button class="ccm-ret">↩ 退回</button></div>`;
+    const hasProp = !!m.proposal;
+    let btns;
+    if (!isNote) {
+      btns = `<button class="ccm-acc">✅ 接受</button><button class="ccm-ret">↩ 退回</button>`;
+    } else if (hasProp) {   // 查/議 附了整合版 → 一鍵套用，免再等 CC
+      btns = `<button class="ccm-acc">✅ 套用整合版</button><button class="ccm-clear">完成·不改</button><button class="ccm-ret">↩ 退回</button>`;
+    } else {   // 只有意見、沒整合版 → 可轉 CC 改寫
+      btns = `<button class="ccm-acc">✅ 完成</button><button class="ccm-improve" title="轉成待處理，交給 CC 把來源/建議寫進這句（要再等 CC 一趟）">✎ 交CC改寫</button><button class="ccm-ret">↩ 退回</button>`;
+    }
+    b.innerHTML = `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-diff"></div><div class="ccm-bactions">${btns}</div>`;
     const diff = b.querySelector(".ccm-diff");
     const row = (cls, tag, text) => {
       const d = document.createElement("div"); d.className = "ccm-drow " + cls;
@@ -195,18 +200,23 @@ function buildBubbleDOM(m, anchorEl) {
       const c = document.createElement("span"); c.className = "ccm-dtext"; c.textContent = text;
       d.appendChild(t); d.appendChild(c); return d;
     };
-    if (m.intent === "潤" && m.proposal) {
+    if (!isNote) {
+      if (m.intent === "潤" && m.proposal) { if (m.quote) diff.appendChild(row("old", "原文", m.quote)); diff.appendChild(row("new", "改為", m.proposal)); }
+      else if (m.intent === "接" && m.proposal) { diff.appendChild(row("new", "新增", m.proposal)); }
+      else { if (m.quote) diff.appendChild(row("old", "原文", m.quote)); diff.appendChild(row("note", "說明", m.note || m.proposal || "(無內容)")); }
+    } else {   // 查/議：原文 + 查證/建議意見 +（若有）整合版
       if (m.quote) diff.appendChild(row("old", "原文", m.quote));
-      diff.appendChild(row("new", "改為", m.proposal));
-    } else if (m.intent === "接" && m.proposal) {
-      diff.appendChild(row("new", "新增", m.proposal));
-    } else {   // 查／議：只給意見，不改字
-      if (m.quote) diff.appendChild(row("old", "原文", m.quote));
-      diff.appendChild(row("note", m.intent === "查" ? "查證" : "建議", m.note || m.proposal || "(無內容)"));
+      diff.appendChild(row("note", m.intent === "查" ? "查證" : "建議", m.note || "(無內容)"));
+      if (hasProp) diff.appendChild(row("new", "套用後", m.proposal));
     }
-    b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); acceptMark(m); };
+    const acc = b.querySelector(".ccm-acc");
+    if (!isNote) acc.onclick = (e) => { e.stopPropagation(); acceptMark(m); };
+    else if (hasProp) acc.onclick = (e) => { e.stopPropagation(); acceptMark(m, "apply"); };
+    else acc.onclick = (e) => { e.stopPropagation(); acceptMark(m, "clear"); };
     b.querySelector(".ccm-ret").onclick = (e) => { e.stopPropagation(); openEdit(m, anchorEl); };
-    if (isNote) b.querySelector(".ccm-improve").onclick = (e) => {
+    const clr = b.querySelector(".ccm-clear"); if (clr) clr.onclick = (e) => { e.stopPropagation(); acceptMark(m, "clear"); };
+    const imp = b.querySelector(".ccm-improve");
+    if (imp) imp.onclick = (e) => {
       e.stopPropagation();
       const src = (m.note || m.proposal || "").trim();   // 把 CC 查到的來源/建議塞進指令，轉潤稿後 CC 才不會又要重查
       const seed = (m.intent === "查" ? "把查證到的來源整合進這句：" : "照這個建議把這句改寫：") + src;
@@ -388,10 +398,14 @@ function siblingAfter(uid) {
   return { parent: uid, order: 0 };
 }
 // ✅ 接受＝Bear 把提案套進原稿（唯一讓字進原稿的動作）
-async function acceptMark(m) {
+async function acceptMark(m, mode) {
   clearAllBubbles();
   try {
-    if (m.intent === "潤" && m.proposal) {
+    const replace = mode === "apply" || (!mode && m.intent === "潤");   // 潤的✅ 或 查/議的「套用整合版」都走替換
+    if (mode === "clear") {
+      await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+      toast("已完成（未改字）");
+    } else if (replace && m.proposal) {
       const curStr = blockString(m.parentUid);
       let next;
       if (m.quote) { next = replaceNth(curStr, m.quote, m.proposal, m.occurrence); if (next === null) return toast("找不到原文，未套用（原稿可能已被改）"); }
@@ -399,7 +413,7 @@ async function acceptMark(m) {
       await window.roamAlphaAPI.updateBlock({ block: { uid: m.parentUid, string: next } });
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
       toast("已接受並套用");
-    } else if (m.intent === "接" && m.proposal) {
+    } else if (!mode && m.intent === "接" && m.proposal) {
       const pos = siblingAfter(m.parentUid);
       await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pos.parent, order: pos.order }, block: { string: m.proposal + " #" + DRAFT_TAG } });
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
@@ -511,7 +525,12 @@ function onKeyDown(e) {
   }
   // ⌥Enter＝接受目前導覽到的待審標記並自動跳下一個；⌥R＝退回
   if (e.altKey && e.code === "Enter" && !e.ctrlKey && !e.metaKey) {
-    if (navCurrent && navCurrent.state === "review") { e.preventDefault(); acceptMark(navCurrent); setTimeout(() => navGo(1), 280); }
+    if (navCurrent && navCurrent.state === "review") {
+      e.preventDefault();
+      const noteProp = (navCurrent.intent === "查" || navCurrent.intent === "議") && navCurrent.proposal;   // 查/議整合版 → ⌥Enter 直接套用
+      acceptMark(navCurrent, noteProp ? "apply" : undefined);
+      setTimeout(() => navGo(1), 280);
+    }
     return;
   }
   if (e.altKey && e.code === "KeyR" && !e.ctrlKey && !e.metaKey) {
@@ -758,6 +777,8 @@ function injectStyle() {
   .ccm-bdel:hover,.ccm-ret:hover{background:#fbf4e8;}
   .ccm-improve{background:#fff;color:#2b7de0;border:1px solid #bcd6f5 !important;}
   .ccm-improve:hover{background:#f0f6fe;}
+  .ccm-clear{background:#f0f2f5;color:#58636e;}
+  .ccm-clear:hover{background:#e4e8ed;}
   .ccm-trigger{position:absolute;z-index:9996;background:#2b7de0;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.22);cursor:pointer;user-select:none;white-space:nowrap;transform:translate(-50%,-100%);}
   .ccm-trigger:hover{background:#1e6fd0;}
   .ccm-panel{position:absolute;z-index:9995;width:300px;background:#fff;border:1px solid #d5dbe2;border-radius:11px;box-shadow:0 10px 30px rgba(16,22,26,.22);padding:11px 12px 12px;transform:translateX(-50%);}
