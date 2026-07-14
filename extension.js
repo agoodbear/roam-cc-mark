@@ -186,7 +186,7 @@ function buildBubbleDOM(m, anchorEl) {
     b.innerHTML =
       `<div class="ccm-lbl">${m.intent}・待審</div><div class="ccm-diff"></div>` +
       `<div class="ccm-bactions"><button class="ccm-acc">${isNote ? "✅ 完成" : "✅ 接受"}</button>` +
-      (isNote ? `<button class="ccm-improve">✎ 改進這句</button>` : "") +
+      (isNote ? `<button class="ccm-improve" title="轉成待處理，交給 CC 把來源/建議寫進這句（要再等 CC 一趟）">✎ 交CC改寫</button>` : "") +
       `<button class="ccm-ret">↩ 退回</button></div>`;
     const diff = b.querySelector(".ccm-diff");
     const row = (cls, tag, text) => {
@@ -266,6 +266,7 @@ function pinBubble(anchorEl, m) {
   pinnedBubble = b;
 }
 function unpinBubble() { if (pinnedBubble) { pinnedBubble.remove(); pinnedBubble = null; } }
+function clearAllBubbles() { removeHoverBubble(); hideNavBubble(); unpinBubble(); }   // 開面板/接受/送出時把所有泡泡收乾淨，避免舊卡殘留
 // 重畫後：釘住的標記若已消失就收掉，否則重新對位（原稿在編輯時版面會跳）
 function syncPinned(desired) {
   if (!pinnedBubble) return;
@@ -388,7 +389,7 @@ function siblingAfter(uid) {
 }
 // ✅ 接受＝Bear 把提案套進原稿（唯一讓字進原稿的動作）
 async function acceptMark(m) {
-  unpinBubble();
+  clearAllBubbles();
   try {
     if (m.intent === "潤" && m.proposal) {
       const curStr = blockString(m.parentUid);
@@ -528,7 +529,7 @@ function refText(m) {
   return "";
 }
 function openEdit(m, anchorEl, opts) {
-  unpinBubble();
+  clearAllBubbles();
   pending = { mode: "edit", childUid: m.childUid, quote: m.quote, occurrence: m.occurrence };
   panelIntent = (opts && opts.intent) || m.intent;
   const el = anchorEl || findBlockTextEl(m.parentUid);
@@ -567,7 +568,7 @@ async function submitPanel() {
   const p = pending;
   if (!p) return hidePanel();
   try { window.getSelection().removeAllRanges(); } catch (e) {}
-  hidePanel();
+  hidePanel(); clearAllBubbles();
   if (p.mode === "edit") await updateMark(p.childUid, panelIntent, ins, p.quote, p.occurrence);
   else for (const m of p.marks) await createMark(m.parentUid, panelIntent, ins, m.quote, m.occurrence);
 }
