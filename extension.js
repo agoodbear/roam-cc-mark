@@ -24,7 +24,7 @@ let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
 let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null;
 let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrence}],label} | edit:{mode,childUid,quote,occurrence}
 let panelIntent = "潤";
-let scrollBound = null, keyBound = null;
+let scrollBound = null, keyBound = null, mdBound = null;
 
 // ── util ──────────────────────────────────────────────────────
 function uidFromId(el) {
@@ -588,15 +588,16 @@ function navMarks() {
   els.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
   return els;
 }
+function hideNavBubble() { if (navBubble) { navBubble.remove(); navBubble = null; } }
 function showNavBubble(anchorEl, m) {
-  if (navBubble) { navBubble.remove(); navBubble = null; }
+  hideNavBubble();
   const b = buildBubbleDOM(m, anchorEl);
   overlayEl.appendChild(b); positionBubble(b, anchorEl);
   navBubble = b;
 }
 function navGo(dir) {
   const els = navMarks();
-  if (!els.length) { updateNavLabel(0); navCurrent = null; if (navBubble) { navBubble.remove(); navBubble = null; } return; }
+  if (!els.length) { updateNavLabel(0); navCurrent = null; hideNavBubble(); return; }
   navIdx = (navIdx + dir + els.length) % els.length;
   const el = els[navIdx];
   el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -680,7 +681,7 @@ function startObserver() {
   const root = document.querySelector(".roam-app") || document.body;
   observer = new MutationObserver(() => { if (applying) return; debouncedRefresh(); });
   observer.observe(root, { childList: true, subtree: true, characterData: true });
-  scrollBound = () => { debouncedRefresh(); };
+  scrollBound = () => { hideNavBubble(); debouncedRefresh(); };
   window.addEventListener("scroll", scrollBound, true);
   window.addEventListener("resize", scrollBound);
 }
@@ -694,6 +695,8 @@ function onload({ extensionAPI }) {
   updateToggle();
   document.addEventListener("mouseup", onMouseUp);
   keyBound = onKeyDown; document.addEventListener("keydown", keyBound, true);
+  mdBound = (e) => { if (navBubble && !navBubble.contains(e.target)) hideNavBubble(); };
+  document.addEventListener("mousedown", mdBound, true);
   startObserver();
   const cmds = [
     { label: "請CC修改：開關標記模式", callback: () => setActive(!active) },
@@ -710,6 +713,7 @@ function onload({ extensionAPI }) {
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
   if (keyBound) document.removeEventListener("keydown", keyBound, true);
+  if (mdBound) document.removeEventListener("mousedown", mdBound, true);
   if (observer) observer.disconnect();
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
   clearDecorations();
