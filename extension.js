@@ -222,9 +222,19 @@ function buildBubbleDOM(m, anchorEl) {
   return b;
 }
 // 泡泡永遠只留一顆（singleton）：滑到新標記＝舊泡泡即刻收掉，徹底避免上下相鄰標記兩顆疊在一起
+function hasDecoration(el) {
+  return !!(el && el.classList && (
+    el.classList.contains("ccm-underline-review") || el.classList.contains("ccm-block-flag-review") ||
+    el.classList.contains("ccm-underline") || el.classList.contains("ccm-block-flag")));
+}
 function attachBubble(anchorEl, m) {
-  anchorEl.__ccmMark = m;   // 供 ⌥↓/⌥Enter 鍵盤審稿取用
-  anchorEl.addEventListener("mouseenter", () => showHoverBubble(anchorEl, m));
+  anchorEl.__ccmMark = m;   // 事件觸發時才讀最新 mark（block 元素會跨重畫重用，不能靠 closure 記舊的）
+  if (anchorEl.__ccmBound) return;   // 同一元素只綁一次，避免 block-flag 每次重畫累加 listener
+  anchorEl.__ccmBound = true;
+  anchorEl.addEventListener("mouseenter", () => {
+    const mm = anchorEl.__ccmMark;
+    if (mm && hasDecoration(anchorEl)) showHoverBubble(anchorEl, mm);   // 標記已清（class 不在了）就不再彈 → 杜絕接受後的鬼泡泡
+  });
   anchorEl.addEventListener("mouseleave", scheduleHoverHide);
 }
 function showHoverBubble(anchorEl, m) {
@@ -284,7 +294,7 @@ function clearDecorations() {
   });
   document.querySelectorAll(".ccm-block-flag, .ccm-block-flag-review").forEach((e) => {
     e.classList.remove("ccm-block-flag", "ccm-block-flag-review");
-    delete e.dataset.ccmChild; delete e.dataset.state;
+    delete e.dataset.ccmChild; delete e.dataset.state; e.__ccmMark = null;   // 清掉，鬼泡泡的 hover 讀不到舊 mark
   });
   document.querySelectorAll(".ccm-mark-hidden").forEach((e) => e.classList.remove("ccm-mark-hidden"));
   overlayEl.innerHTML = "";
