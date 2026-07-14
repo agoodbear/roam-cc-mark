@@ -327,13 +327,24 @@ function captureSelection(allowWholeBlock) {
   return null;
 }
 
+function selectionRect() {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount && !sel.isCollapsed) {
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    if (r.width || r.height) return r;
+  }
+  return null;
+}
 function markFromSelection(x, y, viaKeyboard) {
   const cap = captureSelection(viaKeyboard);
   if (!cap) { hidePanel(); hideTrigger(); return false; }
   pending = { mode: "create", marks: cap.marks, label: cap.label };
   panelIntent = "潤";
-  if (viaKeyboard) { hideTrigger(); showPanel(x, y, cap.label, ""); }
-  else showTrigger(x, y);   // 滑鼠：先跳小鈕（不搶焦點）；點了才開面板
+  if (viaKeyboard) { hideTrigger(); showPanel(x, y, cap.label, ""); return true; }
+  // 滑鼠：小鈕出現在「框選文字上方」（不搶焦點，避開 Roam toolbar）；點了才開面板
+  const r = selectionRect();
+  if (r) showTrigger(r.left + window.scrollX + r.width / 2, r.top + window.scrollY - 6);
+  else showTrigger(x, y - 8);   // textarea 沒有選取 rect → 放滑鼠點上方
   return true;
 }
 
@@ -381,7 +392,7 @@ function setIntent(it) {
   panelEl.querySelector(".ccm-hint").textContent = INTENT_HINT[it];
   panelEl.querySelector(".ccm-chips").style.display = it === "潤" ? "flex" : "none";
 }
-function showTrigger(x, y) { triggerBtn.style.display = "block"; triggerBtn.style.left = x + "px"; triggerBtn.style.top = (y + 10) + "px"; }
+function showTrigger(x, y) { triggerBtn.style.display = "block"; triggerBtn.style.left = x + "px"; triggerBtn.style.top = y + "px"; }
 function hideTrigger() { if (triggerBtn) triggerBtn.style.display = "none"; }
 function showPanel(x, y, label, prefill) {
   const isEdit = pending && pending.mode === "edit";
@@ -556,7 +567,7 @@ function injectStyle() {
   .ccm-bdel,.ccm-ret{background:#fff;color:#e5484d;border:1px solid #f3c0c2 !important;}
   .ccm-ret{color:#8a6d3b;border-color:#e5cf9e !important;}
   .ccm-bdel:hover,.ccm-ret:hover{background:#fbf4e8;}
-  .ccm-trigger{position:absolute;z-index:9996;background:#2b7de0;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.22);cursor:pointer;user-select:none;white-space:nowrap;transform:translateX(-50%);}
+  .ccm-trigger{position:absolute;z-index:9996;background:#2b7de0;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.22);cursor:pointer;user-select:none;white-space:nowrap;transform:translate(-50%,-100%);}
   .ccm-trigger:hover{background:#1e6fd0;}
   .ccm-panel{position:absolute;z-index:9995;width:300px;background:#fff;border:1px solid #d5dbe2;border-radius:11px;box-shadow:0 10px 30px rgba(16,22,26,.22);padding:11px 12px 12px;transform:translateX(-50%);}
   .ccm-panel .ccm-head{font-size:12px;font-weight:800;color:#2b7de0;margin-bottom:7px;}
