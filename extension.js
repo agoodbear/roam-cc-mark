@@ -575,7 +575,7 @@ function setIntent(it) {
   panelEl.querySelector(".ccm-hint").textContent = INTENT_HINT[it];
   panelEl.querySelector(".ccm-chips").style.display = it === "潤" ? "flex" : "none";
 }
-function showTrigger(x, y) { triggerBtn.style.display = "block"; triggerBtn.style.left = clampX(x, triggerBtn.offsetWidth) + "px"; triggerBtn.style.top = y + "px"; }
+function showTrigger(x, y) { triggerBtn.style.display = "flex"; triggerBtn.style.left = clampX(x, triggerBtn.offsetWidth) + "px"; triggerBtn.style.top = y + "px"; }
 function hideTrigger() { if (triggerBtn) triggerBtn.style.display = "none"; }
 function showPanel(x, y, label, prefill, ref) {
   const isEdit = pending && pending.mode === "edit";
@@ -655,13 +655,28 @@ function buildUI() {
   overlayEl = document.createElement("div"); overlayEl.className = "ccm-overlay"; document.body.appendChild(overlayEl);
 
   triggerBtn = document.createElement("div");
-  triggerBtn.className = "ccm-trigger"; triggerBtn.textContent = "✏️ 請CC修改"; triggerBtn.style.display = "none";
-  triggerBtn.addEventListener("mousedown", (e) => e.preventDefault());
-  triggerBtn.addEventListener("click", () => {
+  triggerBtn.className = "ccm-trigger"; triggerBtn.style.display = "none";
+  triggerBtn.addEventListener("mousedown", (e) => e.preventDefault());   // 保住選取，不讓點按收掉 selection
+  // 左：＋新段（以整個 block 為單位、接一段在它後面）；右：請CC修改（改選取的字）
+  const trigInsert = document.createElement("div");
+  trigInsert.className = "ccm-trig-btn ccm-trig-insert"; trigInsert.textContent = "＋ 新段";
+  trigInsert.title = "在這個 block 後面插入新段（接，以整段為單位）";
+  trigInsert.addEventListener("click", () => {
+    if (!pending || !pending.marks || !pending.marks[0]) return hideTrigger();
+    const uid = pending.marks[0].parentUid;
+    const r = triggerBtn.getBoundingClientRect(); hideTrigger();
+    pending = { mode: "create", marks: [{ parentUid: uid, quote: "", occurrence: 1 }], label: "（在此 block 後面插入新段）" };
+    panelIntent = "接";
+    showPanel(r.left + window.scrollX + r.width / 2, r.top + window.scrollY, pending.label, "");
+  });
+  const trigMark = document.createElement("div");
+  trigMark.className = "ccm-trig-btn"; trigMark.textContent = "✏️ 請CC修改";
+  trigMark.addEventListener("click", () => {
     if (!pending) return hideTrigger();
     const r = triggerBtn.getBoundingClientRect(); hideTrigger();
-    showPanel(r.left + window.scrollX, r.top + window.scrollY, pending.label || "", "");
+    showPanel(r.left + window.scrollX + r.width / 2, r.top + window.scrollY, pending.label || "", "");
   });
+  triggerBtn.appendChild(trigInsert); triggerBtn.appendChild(trigMark);
   document.body.appendChild(triggerBtn);
 
   panelEl = document.createElement("div"); panelEl.className = "ccm-panel";
@@ -808,8 +823,11 @@ function injectStyle() {
   .ccm-improve:hover{background:#f0f6fe;}
   .ccm-clear{background:#f0f2f5;color:#58636e;}
   .ccm-clear:hover{background:#e4e8ed;}
-  .ccm-trigger{position:absolute;z-index:9996;background:#2b7de0;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.22);cursor:pointer;user-select:none;white-space:nowrap;transform:translate(-50%,-100%);}
-  .ccm-trigger:hover{background:#1e6fd0;}
+  .ccm-trigger{position:absolute;z-index:9996;display:flex;gap:6px;white-space:nowrap;transform:translate(-50%,-100%);}
+  .ccm-trig-btn{background:#2b7de0;color:#fff;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.22);cursor:pointer;user-select:none;}
+  .ccm-trig-btn:hover{background:#1e6fd0;}
+  .ccm-trig-insert{background:#22a06b;}
+  .ccm-trig-insert:hover{background:#1a8558;}
   .ccm-panel{position:absolute;z-index:9995;width:300px;background:#fff;border:1px solid #d5dbe2;border-radius:11px;box-shadow:0 10px 30px rgba(16,22,26,.22);padding:11px 12px 12px;transform:translateX(-50%);}
   .ccm-panel .ccm-head{font-size:12px;font-weight:800;color:#2b7de0;margin-bottom:7px;}
   .ccm-intents{display:flex;gap:6px;margin-bottom:5px;}
