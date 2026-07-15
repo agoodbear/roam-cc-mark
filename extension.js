@@ -16,6 +16,7 @@
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
 const DRAFT_TAG = "cc草稿";
+const BC_URL = "https://composer.agoodbear.com";   // Blog Composer（照片庫，picker 彈窗來源）
 const INTENTS = ["潤", "接", "查", "議"];
 const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接": "幫我起一段草稿", "查": "查證/補來源，不改字", "議": "給我選項/建議" };
 
@@ -26,7 +27,8 @@ let hoverBubble = null, hoverAnchor = null, hoverHideT = null;   // 泡泡 singl
 let pinnedBubble = null;   // 點一下釘住的泡泡（釘住時 hover 停用，可安穩移去按 ✅/↩）
 let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrence}],label} | edit:{mode,childUid,quote,occurrence}
 let panelIntent = "潤";
-let scrollBound = null, keyBound = null, mdBound = null;
+let scrollBound = null, keyBound = null, mdBound = null, photoMsgBound = null;
+let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：連續挑照片時把新 block 鏈在後面
 
 // ── util ──────────────────────────────────────────────────────
 function uidFromId(el) {
@@ -635,6 +637,30 @@ async function copyMarksPrompt() {
   try { await navigator.clipboard.writeText(text); toast(`已複製本頁 ${rows.length} 個待處理標記給 CC`); }
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
 }
+// ── 從 Blog Composer 挑照片插入 ───────────────────────────────
+function openPhotoPicker(uid) {
+  photoLastUid = uid;   // 第一張插在這個 block 後面，之後每張鏈在前一張後面
+  const url = BC_URL + "/?picker=1&origin=" + encodeURIComponent(window.location.origin);
+  try {
+    photoPopup = window.open(url, "ccm-bc-picker", "width=1100,height=820");
+    if (!photoPopup) return toast("彈窗被擋住了，請允許此站開啟彈出視窗");
+    toast("在彈出的 Blog Composer 挑照片，點縮圖即插入（可連續挑）");
+  } catch (e) { console.warn("[請CC修改] open picker failed", e); toast("開啟 Blog Composer 失敗"); }
+}
+async function insertPhotoBlock(d) {
+  if (!photoLastUid || !d || !d.thumbUrl) return;
+  const cap = String(d.caption || d.name || "照片").replace(/[\[\]]/g, "");
+  const md = "![📷 " + cap + "](" + d.thumbUrl + ")";
+  try {
+    const pos = siblingAfter(photoLastUid);
+    const uid = window.roamAlphaAPI.util.generateUID();
+    await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pos.parent, order: pos.order }, block: { string: md, uid } });
+    photoLastUid = uid;   // 下一張接在這張後面，維持挑選順序
+    toast("已插入照片：" + cap);
+    setTimeout(() => refreshDecorations(true), 150);
+  } catch (err) { console.warn("[請CC修改] insert photo failed", err); toast("插入照片失敗（見 Console）"); }
+}
+
 function toast(msg) {
   const t = document.createElement("div");
   t.className = "ccm-toast"; t.textContent = msg;
@@ -662,6 +688,15 @@ function buildUI() {
     panelIntent = "接";
     showPanel(r.left + window.scrollX + r.width / 2, r.top + window.scrollY, pending.label, "");
   });
+  // 中：📷 加照片（開 Blog Composer picker 彈窗，挑的照片插在這個 block 後面）
+  const trigPhoto = document.createElement("div");
+  trigPhoto.className = "ccm-trig-btn ccm-trig-photo"; trigPhoto.textContent = "📷 加照片";
+  trigPhoto.title = "從 Blog Composer 挑照片，插在這個 block 後面";
+  trigPhoto.addEventListener("click", () => {
+    if (!pending || !pending.marks || !pending.marks[0]) return hideTrigger();
+    const uid = pending.marks[0].parentUid; hideTrigger();
+    openPhotoPicker(uid);
+  });
   const trigMark = document.createElement("div");
   trigMark.className = "ccm-trig-btn"; trigMark.textContent = "✏️ 請CC修改";
   trigMark.addEventListener("click", () => {
@@ -669,7 +704,7 @@ function buildUI() {
     const r = triggerBtn.getBoundingClientRect(); hideTrigger();
     showPanel(r.left + window.scrollX + r.width / 2, r.top + window.scrollY, pending.label || "", "");
   });
-  triggerBtn.appendChild(trigInsert); triggerBtn.appendChild(trigMark);
+  triggerBtn.appendChild(trigInsert); triggerBtn.appendChild(trigPhoto); triggerBtn.appendChild(trigMark);
   document.body.appendChild(triggerBtn);
 
   panelEl = document.createElement("div"); panelEl.className = "ccm-panel";
@@ -814,6 +849,8 @@ function injectStyle() {
   .ccm-trig-btn:hover{background:#1e6fd0;}
   .ccm-trig-insert{background:#22a06b;}
   .ccm-trig-insert:hover{background:#1a8558;}
+  .ccm-trig-photo{background:#7c5cff;}
+  .ccm-trig-photo:hover{background:#6a49f2;}
   .ccm-panel{position:absolute;z-index:9995;width:300px;background:#fff;border:1px solid #d5dbe2;border-radius:11px;box-shadow:0 10px 30px rgba(16,22,26,.22);padding:11px 12px 12px;transform:translateX(-50%);}
   .ccm-panel .ccm-head{font-size:12px;font-weight:800;color:#2b7de0;margin-bottom:7px;}
   .ccm-intents{display:flex;gap:6px;margin-bottom:5px;}
@@ -870,6 +907,13 @@ function onload({ extensionAPI }) {
     if (pinnedBubble && !pinnedBubble.contains(e.target)) unpinBubble();
   };
   document.addEventListener("mousedown", mdBound, true);
+  // Blog Composer picker 彈窗挑完照片 → postMessage 回來，插進原稿
+  photoMsgBound = (e) => {
+    if (e.origin !== BC_URL) return;
+    const d = e.data;
+    if (d && d.type === "bc-photo") insertPhotoBlock(d);
+  };
+  window.addEventListener("message", photoMsgBound);
   startObserver();
   const cmds = [
     { label: "請CC修改：開關標記模式", callback: () => setActive(!active) },
@@ -888,6 +932,8 @@ function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
   if (keyBound) document.removeEventListener("keydown", keyBound, true);
   if (mdBound) document.removeEventListener("mousedown", mdBound, true);
+  if (photoMsgBound) window.removeEventListener("message", photoMsgBound);
+  if (photoPopup && !photoPopup.closed) { try { photoPopup.close(); } catch (e) {} }
   if (observer) observer.disconnect();
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
   unpinBubble();
