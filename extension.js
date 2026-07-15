@@ -20,7 +20,7 @@ const INTENTS = ["潤", "接", "查", "議"];
 const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接": "幫我起一段草稿", "查": "查證/補來源，不改字", "議": "給我選項/建議" };
 
 let api;
-let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
+let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl, insertBtn, fabRow;
 let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null;
 let hoverBubble = null, hoverAnchor = null, hoverHideT = null;   // 泡泡 singleton：全畫面同時只留一顆
 let pinnedBubble = null;   // 點一下釘住的泡泡（釘住時 hover 停用，可安穩移去按 ✅/↩）
@@ -506,6 +506,7 @@ function onMouseUp(e) {
   if (!active) return;
   if (panelEl && panelEl.contains(e.target)) return;
   if (triggerBtn && triggerBtn.contains(e.target)) return;
+  if (fabRow && fabRow.contains(e.target)) return;
   setTimeout(() => markFromSelection(e.pageX, e.pageY, false), 10);
 }
 function keyboardAnchorXY() {
@@ -642,6 +643,13 @@ function toast(msg) {
   setTimeout(() => { t.remove(); }, 2300);
 }
 
+// 滑鼠版「插入新段」：需先把游標點進某個 block（＝要插在它後面）
+function insertAfterCursor() {
+  const ae = document.activeElement;
+  if (!(ae && ae.tagName === "TEXTAREA" && uidFromId(ae))) return toast("先把游標點進要插入位置的上一個 block，再按「＋ 插入段」");
+  const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true, "接");
+}
+
 // ── build UI ─────────────────────────────────────────────────
 function buildUI() {
   overlayEl = document.createElement("div"); overlayEl.className = "ccm-overlay"; document.body.appendChild(overlayEl);
@@ -695,9 +703,15 @@ function buildUI() {
   navEl.querySelector(".ccm-nav-copy").onclick = () => copyMarksPrompt();
   document.body.appendChild(navEl);
 
+  fabRow = document.createElement("div"); fabRow.className = "ccm-fabrow";
+  insertBtn = document.createElement("div"); insertBtn.className = "ccm-insert"; insertBtn.textContent = "＋ 插入段";
+  insertBtn.title = "在游標所在 block 後面插入新段（請 CC 起草）";
+  insertBtn.addEventListener("mousedown", (e) => e.preventDefault());   // 不搶焦點，保留 block 游標
+  insertBtn.onclick = () => insertAfterCursor();
   toggleBtn = document.createElement("div"); toggleBtn.className = "ccm-toggle";
   toggleBtn.title = "開 / 關標記模式（⌥M 隨時可標）"; toggleBtn.onclick = () => setActive(!active);
-  document.body.appendChild(toggleBtn); updateToggle();
+  fabRow.appendChild(insertBtn); fabRow.appendChild(toggleBtn);
+  document.body.appendChild(fabRow); updateToggle();
 }
 
 function updatePill(todo, review) {
@@ -737,7 +751,12 @@ function toggleNav() { if (!navEl) return; if (navEl.style.display !== "none") {
 
 // ── 開關 ─────────────────────────────────────────────────────
 function setActive(v) { active = v; try { api.settings.set("active", v); } catch (e) {} updateToggle(); if (!v) { hidePanel(); hideTrigger(); } }
-function updateToggle() { if (!toggleBtn) return; toggleBtn.textContent = active ? "✏️ 標記模式：開" : "✏️ 標記模式：關"; toggleBtn.classList.toggle("on", active); }
+function updateToggle() {
+  if (!toggleBtn) return;
+  toggleBtn.textContent = active ? "✏️ 標記模式：開" : "✏️ 標記模式：關";
+  toggleBtn.classList.toggle("on", active);
+  if (insertBtn) insertBtn.style.display = active ? "block" : "none";   // 插入段只在標記模式開時出現
+}
 
 // ── style ────────────────────────────────────────────────────
 function injectStyle() {
@@ -816,7 +835,10 @@ function injectStyle() {
   .ccm-nav button{width:26px;height:26px;border:none;border-radius:50%;background:#eef2f6;color:#37424d;cursor:pointer;font-size:12px;line-height:1;}
   .ccm-nav button:hover{background:#2b7de0;color:#fff;}
   .ccm-nav-label{font-size:12px;font-weight:700;color:#58636e;min-width:34px;text-align:center;}
-  .ccm-toggle{position:fixed;right:18px;bottom:18px;z-index:9994;background:#e9edf1;border:1px solid #d5dbe2;color:#58636e;font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;user-select:none;transition:background .12s;}
+  .ccm-fabrow{position:fixed;right:18px;bottom:18px;z-index:9994;display:flex;align-items:center;gap:8px;}
+  .ccm-insert{background:#22a06b;border:1px solid #1a8558;color:#fff;font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.18);cursor:pointer;user-select:none;white-space:nowrap;}
+  .ccm-insert:hover{background:#1a8558;}
+  .ccm-toggle{background:#e9edf1;border:1px solid #d5dbe2;color:#58636e;font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;user-select:none;transition:background .12s;}
   .ccm-toggle.on{background:#2b7de0;border-color:#2b7de0;color:#fff;box-shadow:0 4px 16px rgba(43,125,224,.35);}
   .ccm-toast{position:fixed;left:50%;bottom:46px;transform:translateX(-50%);z-index:9998;background:#1f2937;color:#fff;font-size:12.5px;font-weight:600;padding:8px 16px;border-radius:999px;box-shadow:0 6px 20px rgba(16,22,26,.3);opacity:1;transition:opacity .4s;pointer-events:none;}
   `;
@@ -869,7 +891,7 @@ function onunload() {
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
   unpinBubble();
   clearDecorations();
-  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl].forEach((e) => e && e.remove());
+  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl].forEach((e) => e && e.remove());
   const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
