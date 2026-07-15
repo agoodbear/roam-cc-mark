@@ -30,7 +30,7 @@ let panelIntent = "潤";
 let scrollBound = null, keyBound = null, mdBound = null, photoMsgBound = null;
 let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：連續挑照片時把新 block 鏈在後面
 let fabRow = null, curtainBtn = null;
-let curtainOn = false, curtainEl = null, curtainGrip = null;   // 審稿簾：蓋住已審區、右側握把拖曳追蹤進度
+let curtainOn = false, curtainEl = null, curtainGrip = null, curtainEdge = null;   // 審稿簾：蓋住已審區、握把/虛線拖曳追蹤進度
 let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null;
 
 // ── util ──────────────────────────────────────────────────────
@@ -809,20 +809,26 @@ function curtainScrollerEl() {
     document.querySelector(".rm-article-wrapper") ||
     document.scrollingElement || document.documentElement;
 }
+function curtainStartDrag(e) {
+  e.preventDefault(); e.stopPropagation(); curtainDragging = true;
+  document.addEventListener("pointermove", curtainDragMove);
+  document.addEventListener("pointerup", curtainDragEnd);
+}
 function buildCurtain() {
   curtainEl = document.createElement("div"); curtainEl.className = "ccm-curtain"; curtainEl.style.display = "none";
   document.body.appendChild(curtainEl);
+  // 橫跨寬度的透明拖曳帶，貼在虛線上——整條線都能抓著拉（其餘簾身仍穿透）
+  curtainEdge = document.createElement("div"); curtainEdge.className = "ccm-curtain-edge"; curtainEdge.style.display = "none";
+  curtainEdge.title = "拖曳這條線＝移動審稿進度";
+  curtainEdge.addEventListener("pointerdown", curtainStartDrag);
+  document.body.appendChild(curtainEdge);
   curtainGrip = document.createElement("div"); curtainGrip.className = "ccm-curtain-grip"; curtainGrip.style.display = "none";
   curtainGrip.innerHTML =
     '<span class="ccm-cg-op" title="更透明">－</span>' +
     '<span class="ccm-cg-label" title="拖曳＝移動審稿線">⬍ 審到這</span>' +
     '<span class="ccm-cg-op" title="更濃">＋</span>' +
     '<span class="ccm-cg-x" title="關閉簾子">✕</span>';
-  curtainGrip.querySelector(".ccm-cg-label").addEventListener("pointerdown", (e) => {
-    e.preventDefault(); e.stopPropagation(); curtainDragging = true;
-    document.addEventListener("pointermove", curtainDragMove);
-    document.addEventListener("pointerup", curtainDragEnd);
-  });
+  curtainGrip.querySelector(".ccm-cg-label").addEventListener("pointerdown", curtainStartDrag);
   const ops = curtainGrip.querySelectorAll(".ccm-cg-op");
   ops[0].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity - 0.06); };
   ops[1].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity + 0.06); };
@@ -857,6 +863,9 @@ function positionCurtain() {
   curtainEl.style.background = "rgba(122,110,88," + curtainOpacity + ")";
   curtainGrip.style.top = y + "px";
   curtainGrip.style.left = (left + width) + "px";
+  curtainEdge.style.top = y + "px";
+  curtainEdge.style.left = left + "px";
+  curtainEdge.style.width = width + "px";
 }
 function curtainDragMove(e) {
   if (!curtainDragging) return;
@@ -879,6 +888,7 @@ function setCurtain(on) {
   if (curtainBtn) { curtainBtn.classList.toggle("on", on); curtainBtn.textContent = on ? "🪟 審稿簾：開" : "🪟 審稿簾"; }
   curtainEl.style.display = on ? "block" : "none";
   curtainGrip.style.display = on ? "flex" : "none";
+  curtainEdge.style.display = on ? "block" : "none";
   if (on) { curtainScroller = curtainScrollerEl(); positionCurtain(); }
 }
 
@@ -971,6 +981,8 @@ function injectStyle() {
   .ccm-curtain-btn{background:#efeadf;border:1px solid #d9cfb6;color:#8a6d3b;}
   .ccm-curtain-btn.on{background:#8a6d3b;border-color:#8a6d3b;color:#fff;box-shadow:0 4px 16px rgba(138,109,59,.35);}
   .ccm-curtain{position:fixed;z-index:9985;pointer-events:none;border-bottom:2px dashed rgba(90,78,52,.85);}
+  .ccm-curtain-edge{position:fixed;z-index:9986;height:14px;transform:translateY(-50%);pointer-events:auto;cursor:ns-resize;background:transparent;}
+  .ccm-curtain-edge:hover{background:rgba(138,109,59,.18);}
   .ccm-curtain-grip{position:fixed;z-index:9986;transform:translate(-100%,-50%);display:flex;align-items:center;gap:2px;background:#8a6d3b;color:#fff;font-size:11px;font-weight:800;padding:3px 5px 3px 7px;border-radius:9px 0 0 9px;box-shadow:0 2px 8px rgba(0,0,0,.28);user-select:none;white-space:nowrap;}
   .ccm-curtain-grip .ccm-cg-label{cursor:ns-resize;padding:0 4px;}
   .ccm-curtain-grip .ccm-cg-op,.ccm-curtain-grip .ccm-cg-x{cursor:pointer;width:17px;height:17px;line-height:17px;text-align:center;border-radius:5px;background:rgba(255,255,255,.16);font-size:12px;}
@@ -1040,7 +1052,7 @@ function onunload() {
   unpinBubble();
   clearDecorations();
   if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); }
-  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip].forEach((e) => e && e.remove());
+  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge].forEach((e) => e && e.remove());
   const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
