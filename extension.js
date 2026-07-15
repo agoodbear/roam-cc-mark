@@ -287,9 +287,15 @@ function syncPinned(desired) {
   if (a) positionBubble(pinnedBubble, a);
 }
 
+// 泡泡/面板都用 translateX(-50%)，靠邊時左右會被切 → 把中心點夾在視窗內
+function clampX(cx, width) {
+  const half = (width || 300) / 2, m = 10;
+  const lo = window.scrollX + half + m, hi = window.scrollX + window.innerWidth - half - m;
+  return hi < lo ? cx : Math.max(lo, Math.min(hi, cx));
+}
 function positionBubble(b, anchorEl) {
   const r = anchorEl.getBoundingClientRect();
-  b.style.left = (r.left + window.scrollX + r.width / 2) + "px";
+  b.style.left = clampX(r.left + window.scrollX + r.width / 2, b.offsetWidth) + "px";
   // 預設在文字上方；上方空間不足（貼近視窗頂）就翻到下方，避免泡泡被切掉
   const bh = b.offsetHeight || 96;
   if (r.top - bh - 10 < 8) { b.classList.add("ccm-below"); b.style.top = (r.bottom + window.scrollY + 6) + "px"; }
@@ -481,12 +487,13 @@ function selectionRect() {
   }
   return null;
 }
-function markFromSelection(x, y, viaKeyboard) {
+function markFromSelection(x, y, viaKeyboard, forceIntent) {
   const cap = captureSelection(viaKeyboard);
   if (!cap) { hidePanel(); hideTrigger(); return false; }
   pending = { mode: "create", marks: cap.marks, label: cap.label };
-  panelIntent = "潤";
-  if (viaKeyboard) { hideTrigger(); showPanel(x, y, cap.label, ""); return true; }
+  panelIntent = forceIntent || "潤";
+  const label = forceIntent === "接" ? "（在此 block 後面插入新段）" : cap.label;
+  if (viaKeyboard) { hideTrigger(); showPanel(x, y, label, ""); return true; }
   // 滑鼠：小鈕出現在「框選文字上方」（不搶焦點，避開 Roam toolbar）；點了才開面板
   const r = selectionRect();
   if (r) showTrigger(r.left + window.scrollX + r.width / 2, r.top + window.scrollY - 6);
@@ -515,6 +522,9 @@ function onKeyDown(e) {
   if (e.key === "Escape" && (pinnedBubble || navBubble)) { unpinBubble(); hideNavBubble(); return; }
   if (e.altKey && e.code === "KeyM" && !e.ctrlKey && !e.metaKey) {
     e.preventDefault(); const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true); return;
+  }
+  if (e.altKey && e.code === "KeyN" && !e.ctrlKey && !e.metaKey) {   // 在游標所在 block 後插入新段（接）
+    e.preventDefault(); const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true, "接"); return;
   }
   if (e.altKey && (e.code === "ArrowDown" || e.code === "ArrowUp") && !e.ctrlKey && !e.metaKey) {
     if (!document.querySelector(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review")) return;
@@ -564,7 +574,7 @@ function setIntent(it) {
   panelEl.querySelector(".ccm-hint").textContent = INTENT_HINT[it];
   panelEl.querySelector(".ccm-chips").style.display = it === "潤" ? "flex" : "none";
 }
-function showTrigger(x, y) { triggerBtn.style.display = "block"; triggerBtn.style.left = x + "px"; triggerBtn.style.top = y + "px"; }
+function showTrigger(x, y) { triggerBtn.style.display = "block"; triggerBtn.style.left = clampX(x, triggerBtn.offsetWidth) + "px"; triggerBtn.style.top = y + "px"; }
 function hideTrigger() { if (triggerBtn) triggerBtn.style.display = "none"; }
 function showPanel(x, y, label, prefill, ref) {
   const isEdit = pending && pending.mode === "edit";
@@ -577,7 +587,7 @@ function showPanel(x, y, label, prefill, ref) {
   const ta = panelEl.querySelector("textarea");
   ta.value = prefill || "";
   panelEl.style.display = "block";
-  panelEl.style.left = x + "px"; panelEl.style.top = (y + 12) + "px";
+  panelEl.style.left = clampX(x, panelEl.offsetWidth || 300) + "px"; panelEl.style.top = (y + 12) + "px";
   setTimeout(() => { ta.focus(); ta.select(); }, 0);
 }
 function hidePanel() { if (panelEl) panelEl.style.display = "none"; pending = null; }
@@ -841,6 +851,7 @@ function onload({ extensionAPI }) {
   const cmds = [
     { label: "請CC修改：開關標記模式", callback: () => setActive(!active) },
     { label: "請CC修改：標記游標處 (⌥M)", callback: () => { const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true); } },
+    { label: "請CC修改：在游標 block 後插入新段 (⌥N)", callback: () => { const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true, "接"); } },
     { label: "請CC修改：下一個 (⌥↓)", callback: () => navGo(1) },
     { label: "請CC修改：上一個 (⌥↑)", callback: () => navGo(-1) },
     { label: "請CC修改：打包本頁待處理給 CC", callback: () => copyMarksPrompt() },
@@ -859,7 +870,7 @@ function onunload() {
   unpinBubble();
   clearDecorations();
   [styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl].forEach((e) => e && e.remove());
-  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：重整標記"];
+  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
 }
