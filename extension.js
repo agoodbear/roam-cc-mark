@@ -29,6 +29,9 @@ let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrenc
 let panelIntent = "潤";
 let scrollBound = null, keyBound = null, mdBound = null, photoMsgBound = null;
 let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：連續挑照片時把新 block 鏈在後面
+let fabRow = null, curtainBtn = null;
+let curtainOn = false, curtainEl = null, curtainGrip = null;   // 審稿簾：蓋住已審區、右側握把拖曳追蹤進度
+let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null;
 
 // ── util ──────────────────────────────────────────────────────
 function uidFromId(el) {
@@ -508,7 +511,7 @@ function onMouseUp(e) {
   if (!active) return;
   if (panelEl && panelEl.contains(e.target)) return;
   if (triggerBtn && triggerBtn.contains(e.target)) return;
-  if (toggleBtn && toggleBtn.contains(e.target)) return;
+  if (fabRow && fabRow.contains(e.target)) return;
   setTimeout(() => markFromSelection(e.pageX, e.pageY, false), 10);
 }
 function keyboardAnchorXY() {
@@ -746,9 +749,15 @@ function buildUI() {
   navEl.querySelector(".ccm-nav-copy").onclick = () => copyMarksPrompt();
   document.body.appendChild(navEl);
 
-  toggleBtn = document.createElement("div"); toggleBtn.className = "ccm-toggle";
+  buildCurtain();
+  fabRow = document.createElement("div"); fabRow.className = "ccm-fabrow";
+  curtainBtn = document.createElement("div"); curtainBtn.className = "ccm-fab-btn ccm-curtain-btn"; curtainBtn.textContent = "🪟 審稿簾";
+  curtainBtn.title = "審稿簾：往下審過就把右側握把拉下，簾子蓋住已審區追蹤進度";
+  curtainBtn.onclick = () => setCurtain(!curtainOn);
+  toggleBtn = document.createElement("div"); toggleBtn.className = "ccm-toggle ccm-fab-btn";
   toggleBtn.title = "開 / 關標記模式（⌥M 隨時可標）"; toggleBtn.onclick = () => setActive(!active);
-  document.body.appendChild(toggleBtn); updateToggle();
+  fabRow.appendChild(curtainBtn); fabRow.appendChild(toggleBtn);
+  document.body.appendChild(fabRow); updateToggle();
 }
 
 function updatePill(todo, review) {
@@ -792,6 +801,85 @@ function updateToggle() {
   if (!toggleBtn) return;
   toggleBtn.textContent = active ? "✏️ 標記模式：開" : "✏️ 標記模式：關";
   toggleBtn.classList.toggle("on", active);
+}
+
+// ── 審稿簾（curtain）：往下審過就把右側握把拉下，簾子蓋住已審區、下緣虛線追蹤進度 ──
+function curtainScrollerEl() {
+  return document.querySelector(".roam-article") ||
+    document.querySelector(".rm-article-wrapper") ||
+    document.scrollingElement || document.documentElement;
+}
+function buildCurtain() {
+  curtainEl = document.createElement("div"); curtainEl.className = "ccm-curtain"; curtainEl.style.display = "none";
+  document.body.appendChild(curtainEl);
+  curtainGrip = document.createElement("div"); curtainGrip.className = "ccm-curtain-grip"; curtainGrip.style.display = "none";
+  curtainGrip.innerHTML =
+    '<span class="ccm-cg-op" title="更透明">－</span>' +
+    '<span class="ccm-cg-label" title="拖曳＝移動審稿線">⬍ 審到這</span>' +
+    '<span class="ccm-cg-op" title="更濃">＋</span>' +
+    '<span class="ccm-cg-x" title="關閉簾子">✕</span>';
+  curtainGrip.querySelector(".ccm-cg-label").addEventListener("pointerdown", (e) => {
+    e.preventDefault(); e.stopPropagation(); curtainDragging = true;
+    document.addEventListener("pointermove", curtainDragMove);
+    document.addEventListener("pointerup", curtainDragEnd);
+  });
+  const ops = curtainGrip.querySelectorAll(".ccm-cg-op");
+  ops[0].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity - 0.06); };
+  ops[1].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity + 0.06); };
+  curtainGrip.querySelector(".ccm-cg-x").onclick = (e) => { e.stopPropagation(); setCurtain(false); };
+  document.body.appendChild(curtainGrip);
+}
+function setCurtainOpacity(v) {
+  curtainOpacity = Math.max(0.08, Math.min(0.7, v));
+  positionCurtain();
+  try { api.settings.set("curtainOpacity", curtainOpacity); } catch (e) {}
+}
+function curtainIsDoc(sc) {
+  return sc === document.scrollingElement || sc === document.documentElement || sc === document.body;
+}
+function positionCurtain() {
+  if (!curtainOn || !curtainEl) return;
+  const sc = curtainScroller || (curtainScroller = curtainScrollerEl());
+  const isDoc = curtainIsDoc(sc);
+  const rect = sc.getBoundingClientRect();
+  const scTop = sc.scrollTop || 0;
+  // 內容座標 curtainAnchor → 視窗 Y（div 捲動要加容器偏移，文件捲動直接扣 scrollY，否則會重複扣）
+  const baseTop = isDoc ? 0 : rect.top;
+  const left = isDoc ? 0 : rect.left;
+  const width = isDoc ? window.innerWidth : rect.width;
+  let y = baseTop + (curtainAnchor - scTop);
+  const top = Math.max(0, baseTop);
+  y = Math.max(top, Math.min(window.innerHeight, y));
+  curtainEl.style.left = left + "px";
+  curtainEl.style.width = width + "px";
+  curtainEl.style.top = top + "px";
+  curtainEl.style.height = Math.max(0, y - top) + "px";
+  curtainEl.style.background = "rgba(122,110,88," + curtainOpacity + ")";
+  curtainGrip.style.top = y + "px";
+  curtainGrip.style.left = (left + width) + "px";
+}
+function curtainDragMove(e) {
+  if (!curtainDragging) return;
+  const sc = curtainScroller || curtainScrollerEl();
+  const baseTop = curtainIsDoc(sc) ? 0 : sc.getBoundingClientRect().top;
+  const yv = Math.max(baseTop, Math.min(window.innerHeight, e.clientY));
+  curtainAnchor = (sc.scrollTop || 0) + (yv - baseTop);
+  positionCurtain();
+}
+function curtainDragEnd() {
+  if (!curtainDragging) return;
+  curtainDragging = false;
+  document.removeEventListener("pointermove", curtainDragMove);
+  document.removeEventListener("pointerup", curtainDragEnd);
+  try { api.settings.set("curtainAnchor", Math.round(curtainAnchor)); } catch (e) {}
+}
+function setCurtain(on) {
+  curtainOn = on;
+  try { api.settings.set("curtain", on); } catch (e) {}
+  if (curtainBtn) { curtainBtn.classList.toggle("on", on); curtainBtn.textContent = on ? "🪟 審稿簾：開" : "🪟 審稿簾"; }
+  curtainEl.style.display = on ? "block" : "none";
+  curtainGrip.style.display = on ? "flex" : "none";
+  if (on) { curtainScroller = curtainScrollerEl(); positionCurtain(); }
 }
 
 // ── style ────────────────────────────────────────────────────
@@ -876,8 +964,17 @@ function injectStyle() {
   .ccm-nav button{width:26px;height:26px;border:none;border-radius:50%;background:#eef2f6;color:#37424d;cursor:pointer;font-size:12px;line-height:1;}
   .ccm-nav button:hover{background:#2b7de0;color:#fff;}
   .ccm-nav-label{font-size:12px;font-weight:700;color:#58636e;min-width:34px;text-align:center;}
-  .ccm-toggle{position:fixed;right:18px;bottom:18px;z-index:9994;background:#e9edf1;border:1px solid #d5dbe2;color:#58636e;font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;user-select:none;transition:background .12s;}
+  .ccm-fabrow{position:fixed;right:18px;bottom:18px;z-index:9994;display:flex;align-items:center;gap:8px;}
+  .ccm-fab-btn{font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;user-select:none;white-space:nowrap;}
+  .ccm-toggle{background:#e9edf1;border:1px solid #d5dbe2;color:#58636e;transition:background .12s;}
   .ccm-toggle.on{background:#2b7de0;border-color:#2b7de0;color:#fff;box-shadow:0 4px 16px rgba(43,125,224,.35);}
+  .ccm-curtain-btn{background:#efeadf;border:1px solid #d9cfb6;color:#8a6d3b;}
+  .ccm-curtain-btn.on{background:#8a6d3b;border-color:#8a6d3b;color:#fff;box-shadow:0 4px 16px rgba(138,109,59,.35);}
+  .ccm-curtain{position:fixed;z-index:9985;pointer-events:none;border-bottom:2px dashed rgba(90,78,52,.85);}
+  .ccm-curtain-grip{position:fixed;z-index:9986;transform:translate(-100%,-50%);display:flex;align-items:center;gap:2px;background:#8a6d3b;color:#fff;font-size:11px;font-weight:800;padding:3px 5px 3px 7px;border-radius:9px 0 0 9px;box-shadow:0 2px 8px rgba(0,0,0,.28);user-select:none;white-space:nowrap;}
+  .ccm-curtain-grip .ccm-cg-label{cursor:ns-resize;padding:0 4px;}
+  .ccm-curtain-grip .ccm-cg-op,.ccm-curtain-grip .ccm-cg-x{cursor:pointer;width:17px;height:17px;line-height:17px;text-align:center;border-radius:5px;background:rgba(255,255,255,.16);font-size:12px;}
+  .ccm-curtain-grip .ccm-cg-op:hover,.ccm-curtain-grip .ccm-cg-x:hover{background:rgba(255,255,255,.32);}
   .ccm-toast{position:fixed;left:50%;bottom:46px;transform:translateX(-50%);z-index:9998;background:#1f2937;color:#fff;font-size:12.5px;font-weight:600;padding:8px 16px;border-radius:999px;box-shadow:0 6px 20px rgba(16,22,26,.3);opacity:1;transition:opacity .4s;pointer-events:none;}
   `;
   document.head.appendChild(styleEl);
@@ -888,7 +985,7 @@ function startObserver() {
   const root = document.querySelector(".roam-app") || document.body;
   observer = new MutationObserver(() => { if (applying) return; debouncedRefresh(); });
   observer.observe(root, { childList: true, subtree: true, characterData: true });
-  scrollBound = () => { hideNavBubble(); debouncedRefresh(); };
+  scrollBound = () => { hideNavBubble(); positionCurtain(); debouncedRefresh(); };
   window.addEventListener("scroll", scrollBound, true);
   window.addEventListener("resize", scrollBound);
 }
@@ -900,6 +997,9 @@ function onload({ extensionAPI }) {
   buildUI();
   active = api.settings.get("active") === true;
   updateToggle();
+  const ca = api.settings.get("curtainAnchor"); if (typeof ca === "number") curtainAnchor = ca;
+  const co = api.settings.get("curtainOpacity"); if (typeof co === "number") curtainOpacity = co;
+  setCurtain(api.settings.get("curtain") === true);
   document.addEventListener("mouseup", onMouseUp);
   keyBound = onKeyDown; document.addEventListener("keydown", keyBound, true);
   mdBound = (e) => {
@@ -922,6 +1022,7 @@ function onload({ extensionAPI }) {
     { label: "請CC修改：下一個 (⌥↓)", callback: () => navGo(1) },
     { label: "請CC修改：上一個 (⌥↑)", callback: () => navGo(-1) },
     { label: "請CC修改：打包本頁待處理給 CC", callback: () => copyMarksPrompt() },
+    { label: "請CC修改：審稿簾 開/關", callback: () => setCurtain(!curtainOn) },
     { label: "請CC修改：重整標記", callback: () => refreshDecorations(true) },
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
@@ -938,8 +1039,9 @@ function onunload() {
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
   unpinBubble();
   clearDecorations();
-  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl].forEach((e) => e && e.remove());
-  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：重整標記"];
+  if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); }
+  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip].forEach((e) => e && e.remove());
+  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
 }
