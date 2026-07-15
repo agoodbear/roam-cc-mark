@@ -32,6 +32,7 @@ let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：�
 let fabRow = null, curtainBtn = null;
 let curtainOn = false, curtainEl = null, curtainGrip = null, curtainEdge = null;   // 審稿簾：蓋住已審區、握把/虛線拖曳追蹤進度
 let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null;
+let curtainByPage = {}, curtainPageUid = null;   // 每頁各自記「審到哪個 block」→ 跨頁/跨電腦精準還原
 
 // ── util ──────────────────────────────────────────────────────
 function uidFromId(el) {
@@ -334,6 +335,11 @@ function hideChildBlock(childUid) {
 
 function refreshDecorations(force) {
   if (!overlayEl) return;
+  // 換頁時把審稿簾還原到「這頁上次審到的那段」（本頁沒記錄就停在原位）
+  if (curtainOn) {
+    const pg = currentOpenUid();
+    if (pg && pg !== curtainPageUid) { curtainPageUid = pg; if (!restoreCurtainForPage()) setTimeout(restoreCurtainForPage, 600); }
+  }
   const rows = queryMarks();
   const curPage = currentPage();
   const pageUid = curPage && curPage.uid;
@@ -881,6 +887,45 @@ function curtainDragEnd() {
   document.removeEventListener("pointermove", curtainDragMove);
   document.removeEventListener("pointerup", curtainDragEnd);
   try { api.settings.set("curtainAnchor", Math.round(curtainAnchor)); } catch (e) {}
+  // 把「審到這條線」錨定到某個 block（穩定、跨螢幕/跨電腦），依「本頁」分開記
+  const pg = currentOpenUid();
+  if (pg) { const u = curtainAnchorBlockUid(); if (u) { curtainByPage[pg] = u; saveCurtainPages(); } }
+}
+// 視窗 Y ↔ 內容座標；找出「審稿線上方最後一個 block」＝上次審到的那段
+function curtainContentY(viewportY) {
+  const sc = curtainScroller || curtainScrollerEl();
+  const baseTop = curtainIsDoc(sc) ? 0 : sc.getBoundingClientRect().top;
+  return (sc.scrollTop || 0) + (viewportY - baseTop);
+}
+function curtainFrontierVY() {
+  const sc = curtainScroller || curtainScrollerEl();
+  const baseTop = curtainIsDoc(sc) ? 0 : sc.getBoundingClientRect().top;
+  return baseTop + (curtainAnchor - (sc.scrollTop || 0));
+}
+function curtainAnchorBlockUid() {
+  const fy = curtainFrontierVY();
+  let best = null, bestBottom = -Infinity;
+  document.querySelectorAll(".rm-block-text, .roam-block").forEach((el) => {
+    if (!el.id) return;
+    const u = uidFromId(el); if (!u) return;
+    const b = el.getBoundingClientRect().bottom;
+    if (b <= fy + 4 && b > bestBottom) { bestBottom = b; best = u; }
+  });
+  return best;
+}
+function saveCurtainPages() {
+  const keys = Object.keys(curtainByPage);
+  if (keys.length > 120) for (const k of keys.slice(0, keys.length - 120)) delete curtainByPage[k];
+  try { api.settings.set("curtainPages", JSON.stringify(curtainByPage)); } catch (e) {}
+}
+function restoreCurtainForPage() {
+  if (!curtainOn) return false;
+  const pg = currentOpenUid(); if (!pg) return false;
+  const u = curtainByPage[pg]; if (!u) return false;
+  const el = findBlockTextEl(u); if (!el) return false;   // 該段還沒渲染（收合/未捲到）→ 待重試
+  curtainAnchor = curtainContentY(el.getBoundingClientRect().bottom);
+  positionCurtain();
+  return true;
 }
 function setCurtain(on) {
   curtainOn = on;
@@ -889,7 +934,7 @@ function setCurtain(on) {
   curtainEl.style.display = on ? "block" : "none";
   curtainGrip.style.display = on ? "flex" : "none";
   curtainEdge.style.display = on ? "block" : "none";
-  if (on) { curtainScroller = curtainScrollerEl(); positionCurtain(); }
+  if (on) { curtainScroller = curtainScrollerEl(); curtainPageUid = currentOpenUid(); positionCurtain(); if (!restoreCurtainForPage()) setTimeout(restoreCurtainForPage, 600); }
 }
 
 // ── style ────────────────────────────────────────────────────
@@ -1011,6 +1056,7 @@ function onload({ extensionAPI }) {
   updateToggle();
   const ca = api.settings.get("curtainAnchor"); if (typeof ca === "number") curtainAnchor = ca;
   const co = api.settings.get("curtainOpacity"); if (typeof co === "number") curtainOpacity = co;
+  try { const s = api.settings.get("curtainPages"); if (s) curtainByPage = JSON.parse(s) || {}; } catch (e) { curtainByPage = {}; }
   setCurtain(api.settings.get("curtain") === true);
   document.addEventListener("mouseup", onMouseUp);
   keyBound = onKeyDown; document.addEventListener("keydown", keyBound, true);
