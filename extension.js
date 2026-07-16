@@ -29,7 +29,7 @@ let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrenc
 let panelIntent = "潤";
 let scrollBound = null, keyBound = null, mdBound = null, photoMsgBound = null;
 let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：連續挑照片時把新 block 鏈在後面
-let fabRow = null, curtainBtn = null;
+let fabRow = null, curtainBtn = null, hugoBtn = null;
 let curtainOn = false, curtainEl = null, curtainGrip = null, curtainEdge = null;   // 審稿簾：蓋住已審區、握把/虛線拖曳追蹤進度
 let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null;
 let curtainByPage = {}, curtainPageUid = null, curtainRangeCache = null;   // 每頁各自記「審到哪個 block」＋原稿頭尾範圍（算進度%）
@@ -647,6 +647,38 @@ async function copyMarksPrompt() {
   try { await navigator.clipboard.writeText(text); toast(`已複製本頁 ${rows.length} 個待處理標記給 CC`); }
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
 }
+// ── 打包「轉 Hugo 成稿」任務給新開的 Claude Code ──────────────
+function countTagOnPage(tag, pageUid) {
+  try {
+    const r = window.roamAlphaAPI.q(
+      `[:find (count ?c) :where [?t :node/title "${tag}"] [?c :block/refs ?t] [?c :block/page ?pg] [?pg :block/uid "${pageUid}"]]`);
+    return (r && r[0] && r[0][0]) || 0;
+  } catch (e) { return 0; }
+}
+async function copyHugoPrompt() {
+  const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
+  const todo = countTagOnPage(TODO_TAG, pg.uid) + countTagOnPage(PROP_TAG, pg.uid);
+  const draft = countTagOnPage(DRAFT_TAG, pg.uid);
+  const ready = todo === 0 && draft === 0;
+  const text =
+    `【轉 Hugo · 成稿任務】\n` +
+    `行為法典（第一步務必讀）：\n` +
+    `  1. 本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（§七 轉 Hugo 兩個歸零＋§八 聲音守則；備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）\n` +
+    `  2. 照片解析：本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/blog-composer/ROAM-REFS.md\n` +
+    `對象：Roam page「${pg.title}」（page uid: ${pg.uid}）\n` +
+    `本頁狀態：待處理／待審標記 ${todo}、#cc草稿 ${draft}${ready ? "（已雙歸零，可轉）" : "（未歸零，請先擋下並列出）"}\n\n` +
+    `步驟：\n` +
+    `1. 讀上面兩份法典。\n` +
+    `2. 用 Roam MCP 讀整頁 ${pg.uid}（含所有 block；素材／背景子樹一併看，轉稿時排除）。\n` +
+    `3. 檢查兩個歸零：① #請cc修改／#cc提案 標記＝0 ② #cc草稿＝0。不滿足→列出擋下、不轉。\n` +
+    `4. 照片：抓草稿裡所有 composer.agoodbear.com/r/<refId> → POST http://localhost:8765/api/roam-ref-fetch {"refIds":[…]} 換原檔 → 走 Hugo 媒材管線（照片縮 1600、HEIC→JPG 驗方向、影片有 trim 裁該段 1080p+poster、PDF 拆解）。\n` +
+    `5. 產 content/posts/<type>-post-N.md（Hugo 禁 H1；沿用 ecg／study／travel／erlife-post-N 慣例；跑 zhtw-mcp lint；#cc草稿 出身段落過 /de-ai-zhtw，Bear 原文不進）。\n` +
+    `6. Bear review → 部署草稿 → 回 Roam 頁首寫「✅ 已發佈 → <url> <日期>」。\n` +
+    `（更多脈絡：查 Supabase handovers 最近幾筆這篇的紀錄；遵守 bundle_hugo_blog_ops。）`;
+  try { await navigator.clipboard.writeText(text); toast(ready ? "已複製「轉 Hugo」任務 ✅ 本頁已雙歸零，貼到新的 CC session" : `已複製「轉 Hugo」任務（本頁還有 ${todo} 標記／${draft} 草稿未清，CC 會擋下）`); }
+  catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
+}
+
 // ── 從 Blog Composer 挑照片插入 ───────────────────────────────
 function openPhotoPicker(uid) {
   photoLastUid = uid;   // 第一張插在這個 block 後面，之後每張鏈在前一張後面
@@ -758,12 +790,15 @@ function buildUI() {
 
   buildCurtain();
   fabRow = document.createElement("div"); fabRow.className = "ccm-fabrow";
+  hugoBtn = document.createElement("div"); hugoBtn.className = "ccm-fab-btn ccm-hugo-btn"; hugoBtn.textContent = "🚀 轉Hugo";
+  hugoBtn.title = "本頁改完了 → 打包「轉 Hugo 成稿」任務，貼給新開的 Claude Code session";
+  hugoBtn.onclick = () => copyHugoPrompt();
   curtainBtn = document.createElement("div"); curtainBtn.className = "ccm-fab-btn ccm-curtain-btn"; curtainBtn.textContent = "🪟 審稿簾";
   curtainBtn.title = "審稿簾：往下審過就把右側握把拉下，簾子蓋住已審區追蹤進度";
   curtainBtn.onclick = () => setCurtain(!curtainOn);
   toggleBtn = document.createElement("div"); toggleBtn.className = "ccm-toggle ccm-fab-btn";
   toggleBtn.title = "開 / 關標記模式（⌥M 隨時可標）"; toggleBtn.onclick = () => setActive(!active);
-  fabRow.appendChild(curtainBtn); fabRow.appendChild(toggleBtn);
+  fabRow.appendChild(hugoBtn); fabRow.appendChild(curtainBtn); fabRow.appendChild(toggleBtn);
   document.body.appendChild(fabRow); updateToggle();
 }
 
@@ -1046,6 +1081,8 @@ function injectStyle() {
   .ccm-toggle.on{background:#2b7de0;border-color:#2b7de0;color:#fff;box-shadow:0 4px 16px rgba(43,125,224,.35);}
   .ccm-curtain-btn{background:#efeadf;border:1px solid #d9cfb6;color:#8a6d3b;}
   .ccm-curtain-btn.on{background:#8a6d3b;border-color:#8a6d3b;color:#fff;box-shadow:0 4px 16px rgba(138,109,59,.35);}
+  .ccm-hugo-btn{background:#e8f2ec;border:1px solid #b7dcc7;color:#1a7f54;}
+  .ccm-hugo-btn:hover{background:#d7ecdf;}
   .ccm-curtain{position:fixed;z-index:9985;pointer-events:none;border-bottom:2px dashed rgba(90,78,52,.85);}
   .ccm-curtain-edge{position:fixed;z-index:9986;height:14px;transform:translateY(-50%);pointer-events:auto;cursor:ns-resize;background:transparent;}
   .ccm-curtain-edge:hover{background:rgba(138,109,59,.18);}
@@ -1101,6 +1138,7 @@ function onload({ extensionAPI }) {
     { label: "請CC修改：下一個 (⌥↓)", callback: () => navGo(1) },
     { label: "請CC修改：上一個 (⌥↑)", callback: () => navGo(-1) },
     { label: "請CC修改：打包本頁待處理給 CC", callback: () => copyMarksPrompt() },
+    { label: "請CC修改：打包『轉 Hugo 成稿』給 CC", callback: () => copyHugoPrompt() },
     { label: "請CC修改：審稿簾 開/關", callback: () => setCurtain(!curtainOn) },
     { label: "請CC修改：重整標記", callback: () => refreshDecorations(true) },
   ];
@@ -1120,7 +1158,7 @@ function onunload() {
   clearDecorations();
   if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); }
   [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge].forEach((e) => e && e.remove());
-  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
+  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：打包『轉 Hugo 成稿』給 CC", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
 }
