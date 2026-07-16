@@ -169,6 +169,11 @@ function decorateMark(el, m) {
     el.classList.add(m.state === "review" ? "ccm-block-flag-review" : (m.state === "draft" ? "ccm-block-flag-draft" : "ccm-block-flag"));
     el.dataset.ccmChild = m.childUid; el.dataset.state = m.state;
     anchor = el;
+    // 草稿：點一下釘住「收編卡」（釘住時 hover 停用，相鄰草稿不會互搶；不 preventDefault，照樣能點進去改字）
+    if (m.state === "draft" && !el.__ccmDraftBound) {
+      el.__ccmDraftBound = true;
+      el.addEventListener("click", () => { const mm = el.__ccmMark; if (mm && mm.state === "draft" && hasDecoration(el)) pinBubble(el, mm); });
+    }
   } else if (m.state === "todo") {
     anchor.addEventListener("click", (e) => { e.stopPropagation(); openEdit(m, anchor); });
   } else if (m.state === "review") {
@@ -295,7 +300,8 @@ function syncPinned(desired) {
   const cid = pinnedBubble.__ccmChild;
   if (!desired.some((x) => x.childUid === cid)) { unpinBubble(); return; }
   const a = document.querySelector('.ccm-underline-review[data-child="' + cid + '"]') ||
-            document.querySelector('.ccm-block-flag-review[data-ccm-child="' + cid + '"]');
+            document.querySelector('.ccm-block-flag-review[data-ccm-child="' + cid + '"]') ||
+            document.querySelector('.ccm-block-flag-draft[data-ccm-child="' + cid + '"]');
   if (a) positionBubble(pinnedBubble, a);
 }
 
@@ -370,7 +376,7 @@ function refreshDecorations(force) {
     marks.push({
       state: "draft", childUid: cu, pageUid: pg, inline: true, intent: "草稿",
       parentUid: cu, parentStr: s, quote: "", occurrence: 1,
-      instruction: s.replace(/\s*#(?:cc草稿|\[\[cc草稿\]\])\b/g, "").trim() || "（CC 起草，待你改寫收編）",
+      instruction: s.replace(/\s*#\[\[cc草稿\]\]/g, "").replace(/\s*#cc草稿(?![\w一-鿿])/g, "").trim() || "（CC 起草，待你改寫收編）",
     });
   }
   const desired = marks.filter((m) => findBlockTextEl(m.parentUid));
@@ -463,7 +469,8 @@ async function acceptMark(m, mode) {
 async function clearDraftTag(m) {
   try {
     const cur = blockString(m.childUid);
-    const next = cur.replace(/\s*#(?:cc草稿|\[\[cc草稿\]\])\b/g, "").trim();
+    // 中文字後面 \b 永不成立 → 改用「後面不接中文/字母」的 lookahead 才清得掉
+    const next = cur.replace(/\s*#\[\[cc草稿\]\]/g, "").replace(/\s*#cc草稿(?![\w一-鿿])/g, "").trim();
     await window.roamAlphaAPI.updateBlock({ block: { uid: m.childUid, string: next } });
     toast("已收編（清掉 #cc草稿）");
   } catch (e) { console.warn("[請CC修改] clearDraftTag failed", e); toast("清除失敗（見 Console）"); }
@@ -474,7 +481,7 @@ async function clearDraftTag(m) {
 async function clearInlineTag(m) {
   try {
     const cur = blockString(m.childUid);
-    const next = cur.replace(/\s*#(?:請cc修改|\[\[請cc修改\]\]|cc提案|\[\[cc提案\]\])\b[^\n]*$/, "").trim();
+    const next = cur.replace(/\s*#(?:請cc修改|\[\[請cc修改\]\]|cc提案|\[\[cc提案\]\])[^\n]*$/, "").trim();
     await window.roamAlphaAPI.updateBlock({ block: { uid: m.childUid, string: next } });
     toast("已清掉行內標記（正文保留）");
   } catch (e) { console.warn("[請CC修改] clearInlineTag failed", e); toast("清除失敗（見 Console）"); }
