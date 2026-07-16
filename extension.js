@@ -163,10 +163,10 @@ function wrapNeedle(container, needle, m, cls) {
 }
 
 function decorateMark(el, m) {
-  const cls = m.state === "review" ? "ccm-underline-review" : "ccm-underline";
+  const cls = m.state === "review" ? "ccm-underline-review" : (m.state === "draft" ? "ccm-underline-draft" : "ccm-underline");
   let anchor = m.quote ? wrapNeedle(el, m.quote, m, cls) : null;
   if (!anchor) {
-    el.classList.add(m.state === "review" ? "ccm-block-flag-review" : "ccm-block-flag");
+    el.classList.add(m.state === "review" ? "ccm-block-flag-review" : (m.state === "draft" ? "ccm-block-flag-draft" : "ccm-block-flag"));
     el.dataset.ccmChild = m.childUid; el.dataset.state = m.state;
     anchor = el;
   } else if (m.state === "todo") {
@@ -181,8 +181,13 @@ function decorateMark(el, m) {
 
 function buildBubbleDOM(m, anchorEl) {
   const b = document.createElement("div");
-  b.className = "ccm-bubble" + (m.state === "review" ? " review" : "") + (m.inline ? " inline" : "");
-  if (m.inline) {
+  b.className = "ccm-bubble" + (m.state === "review" ? " review" : "") + (m.state === "draft" ? " draft" : (m.inline ? " inline" : ""));
+  if (m.state === "draft") {
+    b.innerHTML = `<div class="ccm-lbl">草稿・待收編</div><div class="ccm-ins"></div>` +
+      `<div class="ccm-bactions"><button class="ccm-acc">✅ 收編完成（清掉標記）</button></div>`;
+    b.querySelector(".ccm-ins").textContent = "CC 起草的 #cc草稿。改寫成你的話後按這裡清標記（轉 Hugo 前要清空）";
+    b.querySelector(".ccm-acc").onclick = (e) => { e.stopPropagation(); clearDraftTag(m); };
+  } else if (m.inline) {
     b.innerHTML = `<div class="ccm-lbl">定稿・你已改</div><div class="ccm-ins"></div>` +
       `<div class="ccm-bactions"><button class="ccm-acc">🧹 清掉標記</button></div>`;
     b.querySelector(".ccm-ins").textContent = m.instruction;
@@ -241,7 +246,8 @@ function buildBubbleDOM(m, anchorEl) {
 function hasDecoration(el) {
   return !!(el && el.classList && (
     el.classList.contains("ccm-underline-review") || el.classList.contains("ccm-block-flag-review") ||
-    el.classList.contains("ccm-underline") || el.classList.contains("ccm-block-flag")));
+    el.classList.contains("ccm-underline") || el.classList.contains("ccm-block-flag") ||
+    el.classList.contains("ccm-underline-draft") || el.classList.contains("ccm-block-flag-draft")));
 }
 function attachBubble(anchorEl, m) {
   anchorEl.__ccmMark = m;   // 事件觸發時才讀最新 mark（block 元素會跨重畫重用，不能靠 closure 記舊的）
@@ -310,13 +316,13 @@ function positionBubble(b, anchorEl) {
 
 // ── refresh ─────────────────────────────────────────────────
 function clearDecorations() {
-  document.querySelectorAll(".ccm-underline, .ccm-underline-review").forEach((s) => {
+  document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-underline-draft").forEach((s) => {
     const p = s.parentNode; if (!p) return;
     while (s.firstChild) p.insertBefore(s.firstChild, s);
     p.removeChild(s); p.normalize();
   });
-  document.querySelectorAll(".ccm-block-flag, .ccm-block-flag-review").forEach((e) => {
-    e.classList.remove("ccm-block-flag", "ccm-block-flag-review");
+  document.querySelectorAll(".ccm-block-flag, .ccm-block-flag-review, .ccm-block-flag-draft").forEach((e) => {
+    e.classList.remove("ccm-block-flag", "ccm-block-flag-review", "ccm-block-flag-draft");
     delete e.dataset.ccmChild; delete e.dataset.state; e.__ccmMark = null;   // 清掉，鬼泡泡的 hover 讀不到舊 mark
   });
   document.querySelectorAll(".ccm-mark-hidden").forEach((e) => e.classList.remove("ccm-mark-hidden"));
@@ -359,23 +365,32 @@ function refreshDecorations(force) {
     }
     marks.push(m);
   }
+  // #cc草稿：CC 起草待你收編的段落（不是標記 child，是正文本身）→ 也標色、進導覽、可清標記
+  for (const [cu, pu, s, pg] of queryByTag(DRAFT_TAG)) {
+    marks.push({
+      state: "draft", childUid: cu, pageUid: pg, inline: true, intent: "草稿",
+      parentUid: cu, parentStr: s, quote: "", occurrence: 1,
+      instruction: s.replace(/\s*#(?:cc草稿|\[\[cc草稿\]\])\b/g, "").trim() || "（CC 起草，待你改寫收編）",
+    });
+  }
   const desired = marks.filter((m) => findBlockTextEl(m.parentUid));
   // 本頁計數：頁 uid 對得上就用全頁數；對不上/偵測不到就退回「畫面上的底線數」→ 只要有底線就一定顯示膠囊
   const pageMatched = pageUid ? marks.filter((m) => m.pageUid === pageUid) : [];
   const counted = pageMatched.length ? pageMatched : desired;
   const todoCount = counted.filter((m) => m.state === "todo").length;
   const reviewCount = counted.filter((m) => m.state === "review").length;
+  const draftCount = counted.filter((m) => m.state === "draft").length;
   const sig = desired.map((m) => m.childUid + ":" + m.state).sort().join("|");
   const cur = [];
-  document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review")
+  document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-underline-draft, .ccm-block-flag, .ccm-block-flag-review, .ccm-block-flag-draft")
     .forEach((e) => cur.push((e.dataset.child || e.dataset.ccmChild) + ":" + (e.dataset.state || "")));
   const same = sig === cur.sort().join("|");
-  if (!force && same) { updatePill(todoCount, reviewCount); syncPinned(desired); return; }
+  if (!force && same) { updatePill(todoCount, reviewCount, draftCount); syncPinned(desired); return; }
 
   applying = true;
   clearDecorations();
   for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) hideChildBlock(m.childUid); }
-  updatePill(todoCount, reviewCount);
+  updatePill(todoCount, reviewCount, draftCount);
   syncPinned(desired);
   setTimeout(() => { applying = false; }, 0);
 }
@@ -441,6 +456,17 @@ async function acceptMark(m, mode) {
       toast("已標記完成");
     }
   } catch (e) { console.warn("[請CC修改] accept failed", e); toast("套用失敗（見 Console）"); }
+  setTimeout(() => refreshDecorations(true), 120);
+}
+
+// ✅ 收編完成：清掉 #cc草稿 tag（Bear 已把草稿改寫成自己的話；正文保留，只拿掉 tag）
+async function clearDraftTag(m) {
+  try {
+    const cur = blockString(m.childUid);
+    const next = cur.replace(/\s*#(?:cc草稿|\[\[cc草稿\]\])\b/g, "").trim();
+    await window.roamAlphaAPI.updateBlock({ block: { uid: m.childUid, string: next } });
+    toast("已收編（清掉 #cc草稿）");
+  } catch (e) { console.warn("[請CC修改] clearDraftTag failed", e); toast("清除失敗（見 Console）"); }
   setTimeout(() => refreshDecorations(true), 120);
 }
 
@@ -540,7 +566,7 @@ function onKeyDown(e) {
     e.preventDefault(); const p = keyboardAnchorXY(); markFromSelection(p.x, p.y, true, "接"); return;
   }
   if (e.altKey && (e.code === "ArrowDown" || e.code === "ArrowUp") && !e.ctrlKey && !e.metaKey) {
-    if (!document.querySelector(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review")) return;
+    if (!document.querySelector(".ccm-underline, .ccm-underline-review, .ccm-underline-draft, .ccm-block-flag, .ccm-block-flag-review, .ccm-block-flag-draft")) return;
     e.preventDefault();
     if (navEl && navEl.style.display === "none") { navEl.style.display = "flex"; navIdx = -1; }
     navGo(e.code === "ArrowDown" ? 1 : -1);
@@ -553,6 +579,8 @@ function onKeyDown(e) {
       const noteProp = (navCurrent.intent === "查" || navCurrent.intent === "議") && navCurrent.proposal;   // 查/議整合版 → ⌥Enter 直接套用
       acceptMark(navCurrent, noteProp ? "apply" : undefined);
       setTimeout(() => navGo(1), 280);
+    } else if (navCurrent && navCurrent.state === "draft") {
+      e.preventDefault(); clearDraftTag(navCurrent); setTimeout(() => navGo(1), 280);   // 草稿 → ⌥Enter＝收編完成
     }
     return;
   }
@@ -802,16 +830,16 @@ function buildUI() {
   document.body.appendChild(fabRow); updateToggle();
 }
 
-function updatePill(todo, review) {
+function updatePill(todo, review, draft) {
   if (!pillEl) return;
-  if (!todo && !review) { pillEl.style.display = "none"; if (navEl) navEl.style.display = "none"; return; }
+  if (!todo && !review && !draft) { pillEl.style.display = "none"; if (navEl) navEl.style.display = "none"; return; }
   pillEl.style.display = "block";
-  pillEl.innerHTML = `📝 待處理 <b>${todo}</b>` + (review ? ` · <span class="ccm-rev">待審 ${review}</span>` : "");
+  pillEl.innerHTML = `📝 待處理 <b>${todo}</b>` + (review ? ` · <span class="ccm-rev">待審 ${review}</span>` : "") + (draft ? ` · <span class="ccm-draft">草稿 ${draft}</span>` : "");
 }
 
 // ── 上下導覽 ─────────────────────────────────────────────────
 function navMarks() {
-  const els = Array.from(document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-block-flag, .ccm-block-flag-review"));
+  const els = Array.from(document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-underline-draft, .ccm-block-flag, .ccm-block-flag-review, .ccm-block-flag-draft"));
   els.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
   return els;
 }
@@ -1003,6 +1031,11 @@ function injectStyle() {
   .ccm-underline-review:hover{background:#bff0d4;}
   .ccm-block-flag{box-shadow:-3px 0 0 #f0a020;background:#fffaf0;}
   .ccm-block-flag-review{box-shadow:-3px 0 0 #22a06b;background:#f0fbf5;}
+  .ccm-underline-draft{background:#e7e9ff;border-bottom:2px solid #6a5acd;border-radius:2px;padding:0 1px;}
+  .ccm-block-flag-draft{box-shadow:-3px 0 0 #6a5acd;background:#f5f4ff;}
+  .ccm-bubble.draft{border-color:#b7b0ee;}
+  .ccm-bubble.draft .ccm-lbl{color:#5a4bc4;}
+  .ccm-bubble.draft::after{filter:drop-shadow(0 1px 0 #b7b0ee);}
   .ccm-mark-hidden{display:none !important;}
   .ccm-overlay{position:absolute;top:0;left:0;width:0;height:0;z-index:9990;pointer-events:none;}
   .ccm-bubble{position:absolute;width:max-content;max-width:280px;background:#fff;border:1px solid #f0c453;border-radius:9px;
@@ -1070,7 +1103,7 @@ function injectStyle() {
   .ccm-cancel{background:#f0f2f5;color:#58636e;}
   .ccm-save{background:#2b7de0;color:#fff;font-weight:700;} .ccm-save:hover{background:#1e6fd0;}
   .ccm-pill{position:fixed;right:18px;bottom:58px;z-index:9994;background:#fff;border:1px solid #f6d67a;color:#92660b;font-size:12.5px;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;}
-  .ccm-pill b{color:#c47f0a;} .ccm-pill .ccm-rev{color:#1a7f54;font-weight:700;}
+  .ccm-pill b{color:#c47f0a;} .ccm-pill .ccm-rev{color:#1a7f54;font-weight:700;} .ccm-pill .ccm-draft{color:#5a4bc4;font-weight:700;}
   .ccm-nav{position:fixed;right:18px;bottom:98px;z-index:9994;display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #d5dbe2;border-radius:999px;padding:4px 8px;box-shadow:0 4px 14px rgba(16,22,26,.16);}
   .ccm-nav button{width:26px;height:26px;border:none;border-radius:50%;background:#eef2f6;color:#37424d;cursor:pointer;font-size:12px;line-height:1;}
   .ccm-nav button:hover{background:#2b7de0;color:#fff;}
