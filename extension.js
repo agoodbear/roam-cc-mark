@@ -22,7 +22,7 @@ const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接
 
 let api;
 let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
-let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null;
+let observer, debounceTimer, applying = false, active = false, navIdx = -1, navCurrent = null, navBubble = null, navScrolling = false;
 let hoverBubble = null, hoverAnchor = null, hoverHideT = null;   // 泡泡 singleton：全畫面同時只留一顆
 let pinnedBubble = null;   // 點一下釘住的泡泡（釘住時 hover 停用，可安穩移去按 ✅/↩）
 let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrence}],label} | edit:{mode,childUid,quote,occurrence}
@@ -333,7 +333,7 @@ function clearDecorations() {
   });
   document.querySelectorAll(".ccm-mark-hidden").forEach((e) => e.classList.remove("ccm-mark-hidden"));
   overlayEl.innerHTML = "";
-  hoverBubble = null; hoverAnchor = null; navBubble = null;
+  hoverBubble = null; hoverAnchor = null;   // navBubble 在 body、不在 overlay，別在這裡清（交給 syncNav）
   if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
 }
 
@@ -391,13 +391,13 @@ function refreshDecorations(force) {
   document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-underline-draft, .ccm-block-flag, .ccm-block-flag-review, .ccm-block-flag-draft")
     .forEach((e) => cur.push((e.dataset.child || e.dataset.ccmChild) + ":" + (e.dataset.state || "")));
   const same = sig === cur.sort().join("|");
-  if (!force && same) { updatePill(todoCount, reviewCount, draftCount); syncPinned(desired); return; }
+  if (!force && same) { updatePill(todoCount, reviewCount, draftCount); syncPinned(desired); syncNav(desired); return; }
 
   applying = true;
   clearDecorations();
   for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) hideChildBlock(m.childUid); }
   updatePill(todoCount, reviewCount, draftCount);
-  syncPinned(desired);
+  syncPinned(desired); syncNav(desired);
   setTimeout(() => { applying = false; }, 0);
 }
 const debouncedRefresh = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(refreshDecorations, 250); };
@@ -854,19 +854,28 @@ function hideNavBubble() { if (navBubble) { navBubble.remove(); navBubble = null
 function showNavBubble(anchorEl, m) {
   hideNavBubble(); removeHoverBubble();   // singleton：導覽泡泡出現時也收掉 hover 泡泡
   const b = buildBubbleDOM(m, anchorEl);
-  overlayEl.appendChild(b); positionBubble(b, anchorEl);
+  b.__ccmNav = m.childUid;
+  document.body.appendChild(b); positionBubble(b, anchorEl);   // 放 body，不隨 overlay 重畫被清掉
   navBubble = b;
+}
+// 重畫後：導覽泡泡的標記若還在就重新對位，不在就收掉（遠處捲動觸發虛擬化重繪的兜底）
+function syncNav(desired) {
+  if (!navBubble || !navCurrent) return;
+  if (!desired.some((x) => x.childUid === navCurrent.childUid)) { hideNavBubble(); return; }
+  const el = findBlockTextEl(navCurrent.parentUid);
+  if (el) positionBubble(navBubble, el);
 }
 function navGo(dir) {
   const els = navMarks();
   if (!els.length) { updateNavLabel(0); navCurrent = null; hideNavBubble(); return; }
   navIdx = (navIdx + dir + els.length) % els.length;
   const el = els[navIdx];
-  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  navScrolling = true;   // 捲動途中別讓 scrollBound 把待彈的導覽泡泡收掉（遠處標記彈不出來的元兇）
+  el.scrollIntoView({ block: "center" });   // 即時捲動（smooth 動畫期間 scrollBound 會一直 hideNavBubble）
   const prev = el.style.background; el.style.background = "#ffd54a";
   setTimeout(() => { el.style.background = prev; }, 900);
   navCurrent = el.__ccmMark || null;
-  if (navCurrent) setTimeout(() => { if (document.body.contains(el)) showNavBubble(el, navCurrent); }, 340); // 等捲動到位再定位泡泡
+  setTimeout(() => { if (navCurrent && document.body.contains(el)) showNavBubble(el, navCurrent); navScrolling = false; }, 180);
   updateNavLabel(els.length);
 }
 function updateNavLabel(total) { const lbl = navEl && navEl.querySelector(".ccm-nav-label"); if (lbl) lbl.textContent = total ? (navIdx + 1) + "/" + total : "0"; }
@@ -1140,7 +1149,7 @@ function startObserver() {
   const root = document.querySelector(".roam-app") || document.body;
   observer = new MutationObserver(() => { if (applying) return; debouncedRefresh(); });
   observer.observe(root, { childList: true, subtree: true, characterData: true });
-  scrollBound = (e) => { if (e && e.type === "resize") curtainRangeCache = null; hideNavBubble(); positionCurtain(); debouncedRefresh(); };
+  scrollBound = (e) => { if (e && e.type === "resize") curtainRangeCache = null; if (!navScrolling) hideNavBubble(); positionCurtain(); debouncedRefresh(); };
   window.addEventListener("scroll", scrollBound, true);
   window.addEventListener("resize", scrollBound);
 }
@@ -1194,7 +1203,7 @@ function onunload() {
   if (photoPopup && !photoPopup.closed) { try { photoPopup.close(); } catch (e) {} }
   if (observer) observer.disconnect();
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
-  unpinBubble();
+  unpinBubble(); hideNavBubble();
   clearDecorations();
   if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); }
   [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge].forEach((e) => e && e.remove());
