@@ -16,6 +16,8 @@
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
 const DRAFT_TAG = "cc草稿";
+const REFORMAT_PROP_TAG = "cc排版提案";     // 整篇重排版：CC 回寫的提案 root（頁面級標記 block）
+const REFORMAT_BACKUP_TAG = "cc排版備份";   // 套用重排後，原稿整樹搬進的 🗄 備份 root
 const BC_URL = "https://composer.agoodbear.com";   // Blog Composer（照片庫，picker 彈窗來源）
 const INTENTS = ["潤", "接", "查", "議"];
 const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接": "幫我起一段草稿", "查": "查證/補來源，不改字", "議": "給我選項/建議" };
@@ -29,7 +31,7 @@ let pending = null;            // create:{mode,marks:[{parentUid,quote,occurrenc
 let panelIntent = "潤";
 let scrollBound = null, keyBound = null, mdBound = null, photoMsgBound = null;
 let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：連續挑照片時把新 block 鏈在後面
-let fabRow = null, curtainBtn = null, hugoBtn = null;
+let fabRow = null, curtainBtn = null, hugoBtn = null, reformatBtn = null, reformatCard = null;   // reformatBtn=FAB 第4顆；reformatCard=三態卡（fixed，錨在 FAB 上方）
 let curtainOn = false, curtainEl = null, curtainGrip = null, curtainEdge = null;   // 審稿簾：蓋住已審區、握把/虛線拖曳追蹤進度
 let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null;
 let curtainByPage = {}, curtainPageUid = null, curtainRangeCache = null;   // 每頁各自記「審到哪個 block」＋原稿頭尾範圍（算進度%）
@@ -109,6 +111,17 @@ function queryByTag(tagTitle) {
         [?p :block/page ?pg] [?pg :block/uid ?pageuid]]`;
     return window.roamAlphaAPI.q(q) || [];
   } catch (e) { console.warn("[請CC修改] query failed", e); return []; }
+}
+// #cc草稿 常掛在「頂層正文 block」（父＝page、無 :block/string）→ queryByTag 硬要父 block 有字會漏掉它。
+// 改用 :block/page 直接取頁面。回 [cu, pageuid, s]（草稿的 parentUid＝自己，不需父 uid）。2026-07-19 live 驗：queryByTag 漏抓、此法抓到本頁 3 筆。
+function queryDraftTag() {
+  try {
+    const q = `[:find ?cu ?pageuid ?s
+      :where [?t :node/title "${DRAFT_TAG}"]
+        [?c :block/refs ?t] [?c :block/uid ?cu] [?c :block/string ?s]
+        [?c :block/page ?pg] [?pg :block/uid ?pageuid]]`;
+    return window.roamAlphaAPI.q(q) || [];
+  } catch (e) { console.warn("[請CC修改] draft query failed", e); return []; }
 }
 function queryMarks() { return [...queryByTag(TODO_TAG), ...queryByTag(PROP_TAG)]; }
 
@@ -381,7 +394,7 @@ function refreshDecorations(force) {
     marks.push(m);
   }
   // #cc草稿：CC 起草待你收編的段落（不是標記 child，是正文本身）→ 也標色、進導覽、可清標記
-  for (const [cu, pu, s, pg] of queryByTag(DRAFT_TAG)) {
+  for (const [cu, pg, s] of queryDraftTag()) {
     marks.push({
       state: "draft", childUid: cu, pageUid: pg, inline: true, intent: "草稿",
       parentUid: cu, parentStr: s, quote: "", occurrence: 1,
@@ -400,12 +413,13 @@ function refreshDecorations(force) {
   document.querySelectorAll(".ccm-underline, .ccm-underline-review, .ccm-underline-draft, .ccm-block-flag, .ccm-block-flag-review, .ccm-block-flag-draft")
     .forEach((e) => cur.push((e.dataset.child || e.dataset.ccmChild) + ":" + (e.dataset.state || "")));
   const same = sig === cur.sort().join("|");
-  if (!force && same) { updatePill(todoCount, reviewCount, draftCount); syncPinned(desired); syncNav(desired); return; }
+  if (!force && same) { updatePill(todoCount, reviewCount, draftCount); updateReformatBtn(pageUid); syncPinned(desired); syncNav(desired); return; }
 
   applying = true;
   clearDecorations();
   for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) hideChildBlock(m.childUid); }
   updatePill(todoCount, reviewCount, draftCount);
+  updateReformatBtn(pageUid);
   syncPinned(desired); syncNav(desired);
   setTimeout(() => { applying = false; }, 0);
 }
@@ -716,6 +730,359 @@ async function copyHugoPrompt() {
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
 }
 
+// ── 整篇重排版（reformat）：打包給 CC 依內容重排（只動版面、不改一個字）──────────
+// 混合路線：CC 出「提案樹」（隔離、帶身分），extension 做零位移驗證＋原子套用＋備份。
+// 安全模型同 acceptMark：套用是 Bear 按的（extension＝Bear 的手），驗不過就鎖死套用鈕（fail-closed）。
+
+// 素材/🗄備份/#cc排版提案/「✅ 已發佈」＝重排不碰的特殊 top-level root，攤平正文時整棵略過
+function isReformatExcludedRoot(str) {
+  const s = (str || "").trim();
+  return /^🗂/.test(s) ||                                       // 🗂 素材／背景子樹
+    /^🗄/.test(s) ||                                            // 🗄 排版前備份／還原前狀態子樹
+    /#cc排版備份/.test(s) || /#\[\[cc排版備份\]\]/.test(s) ||    // #cc排版備份 root（🗄 被手動去掉也擋）
+    /#cc排版提案/.test(s) || /#\[\[cc排版提案\]\]/.test(s) ||    // #cc排版提案 root
+    /^✅\s*已發佈/.test(s);                                     // ✅ 已發佈 封存行
+}
+// 頁面 top-level 正文樹 → 深度優先攤平成字串陣列（過濾特殊 root）。驗證用；順序＝:block/order
+function gatherBodyBlocks(pageUid) {
+  let tree;
+  try { tree = window.roamAlphaAPI.pull("[:block/uid :block/string :block/order {:block/children ...}]", [":block/uid", pageUid]); }
+  catch (e) { console.warn("[請CC修改] gatherBodyBlocks pull failed", e); return []; }
+  const out = [];
+  const sortKids = (n) => ((n && n[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
+  const walk = (n) => { out.push(n[":block/string"] || ""); for (const k of sortKids(n)) walk(k); };
+  for (const t of sortKids(tree)) { if (isReformatExcludedRoot(t[":block/string"])) continue; walk(t); }
+  return out;
+}
+// 現有正文 top-level blocks（排除特殊 root）→ [{uid, order}]，套用時整棵搬進備份。與 gatherBodyBlocks 共用過濾
+function topLevelBodyUids(pageUid) {
+  let tree;
+  try { tree = window.roamAlphaAPI.pull("[{:block/children [:block/uid :block/string :block/order]}]", [":block/uid", pageUid]); }
+  catch (e) { console.warn("[請CC修改] topLevelBodyUids pull failed", e); return []; }
+  const top = ((tree && tree[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
+  const out = [];
+  for (const t of top) { if (isReformatExcludedRoot(t[":block/string"])) continue; out.push({ uid: t[":block/uid"], order: t[":block/order"] || 0 }); }
+  return out;
+}
+// 頁上是否有「✅ 已發佈」封存行（top-level）→ 已封存頁擋下重排
+function pageHasPublished(pageUid) {
+  try {
+    const tree = window.roamAlphaAPI.pull("[{:block/children [:block/string]}]", [":block/uid", pageUid]);
+    return ((tree && tree[":block/children"]) || []).some((k) => /^\s*✅\s*已發佈/.test(k[":block/string"] || ""));
+  } catch (e) { return false; }
+}
+// 查本頁 #cc排版提案 root，解析【變更摘要】/【建議】/【重排結果】uid 與內容；【重排結果】子樹攤平＝待驗正文
+function queryReformatProposal(pageUid) {
+  let rootUid = null;
+  try {
+    const r = window.roamAlphaAPI.q(
+      `[:find ?u :where [?t :node/title "${REFORMAT_PROP_TAG}"] [?c :block/refs ?t] [?c :block/uid ?u] [?c :block/page ?pg] [?pg :block/uid "${pageUid}"]]`) || [];
+    if (r.length) rootUid = r[0][0];
+  } catch (e) { console.warn("[請CC修改] queryReformatProposal failed", e); return null; }
+  if (!rootUid) return null;
+  let tree;
+  try { tree = window.roamAlphaAPI.pull("[:block/uid :block/string :block/order {:block/children ...}]", [":block/uid", rootUid]); }
+  catch (e) { return null; }
+  const sortKids = (n) => ((n && n[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
+  const kids = sortKids(tree);
+  const find = (kw) => kids.find((k) => (k[":block/string"] || "").indexOf(kw) !== -1) || null;
+  const summaryNode = find("【變更摘要】"), suggestNode = find("【建議】"), resultNode = find("【重排結果】");
+  const flat = [];
+  if (resultNode) { const walk = (n) => { flat.push(n[":block/string"] || ""); for (const c of sortKids(n)) walk(c); }; for (const c of sortKids(resultNode)) walk(c); }
+  return {
+    rootUid, rootStr: (tree && tree[":block/string"]) || "",
+    summaryStr: summaryNode ? (summaryNode[":block/string"] || "") : "",
+    suggestStr: suggestNode ? (suggestNode[":block/string"] || "") : "",
+    resultUid: resultNode && resultNode[":block/uid"], resultNode, proposalTexts: flat,
+  };
+}
+// 查本頁所有 #cc排版備份 root（正常至多一個）→ [{uid, str}]
+function queryReformatBackups(pageUid) {
+  try {
+    return (window.roamAlphaAPI.q(
+      `[:find ?u ?s :where [?t :node/title "${REFORMAT_BACKUP_TAG}"] [?c :block/refs ?t] [?c :block/uid ?u] [?c :block/string ?s] [?c :block/page ?pg] [?pg :block/uid "${pageUid}"]]`) || [])
+      .map(([u, s]) => ({ uid: u, str: s }));
+  } catch (e) { return []; }
+}
+
+// ── 零位移驗證（安全核心）：純函式、無 Roam 依賴，可 headless 對抗式測 ───────────
+// 正規化：去 **／__（唯一允許新增的格式），所有空白壓成單一空白，去首尾空白
+function normReformatText(s) {
+  return (s || "").replace(/\*\*/g, "").replace(/__/g, "").replace(/\s+/g, " ").trim();
+}
+// 「## 」或「### 」開頭＝提案新增的標題 block（唯一合法新增）→ 比對前剔除
+function isHeadingBlock(s) { return /^\s*#{2,3}\s/.test(s || ""); }
+// 守恆計數：格式記號兩側次數必一致（防「文字沒改但把 highlight／ref／圖片弄丟」）
+function countReformatTokens(raw) {
+  const c = (re) => (raw.match(re) || []).length;
+  return {
+    link: c(/\[\[[^\[\]]*\]\]/g),        // [[…]]
+    blockref: c(/\(\([^()]*\)\)/g),      // ((…))
+    highlight: c(/\^\^[\s\S]*?\^\^/g),   // ^^…^^
+    render: c(/\{\{[^{}]*\}\}/g),        // {{…}}
+    image: c(/!\[[^\]]*\]\([^()]*\)/g),  // ![…](…)
+  };
+}
+function verifyZeroDrift(bodyTexts, proposalTexts) {
+  const bodyBlocks = bodyTexts || [];
+  const propBlocks = (proposalTexts || []).filter((s) => !isHeadingBlock(s));   // 剔除提案側 ##/### 標題
+  const bodyNorm = bodyBlocks.map(normReformatText).filter((x) => x);
+  const propNorm = propBlocks.map(normReformatText).filter((x) => x);
+  const A = bodyNorm.join(""), B = propNorm.join("");   // 逐字串接（禁段落搬移 → 串接比對成立）
+  let textOk = A === B, firstDiff = null;
+  if (!textOk) {
+    let i = 0; const n = Math.min(A.length, B.length);
+    while (i < n && A[i] === B[i]) i++;
+    firstDiff = { pos: i, before: A.slice(Math.max(0, i - 20), i + 20), after: B.slice(Math.max(0, i - 20), i + 20) };
+  }
+  const bc = countReformatTokens(bodyBlocks.join("\n")), pc = countReformatTokens(propBlocks.join("\n"));
+  const counts = { ok: true, body: bc, proposal: pc, diff: [] };
+  for (const k of Object.keys(bc)) if (bc[k] !== pc[k]) { counts.ok = false; counts.diff.push({ kind: k, body: bc[k], proposal: pc[k] }); }
+  return { ok: textOk && counts.ok, textOk, firstDiff, counts };
+}
+
+// ── 日期／小工具 ──
+function reformatStamp() { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
+function reformatDate() { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }
+function escapeHtml(s) { return (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function tokenLabel(k) { return { link: "[[連結]]", blockref: "((引用))", highlight: "^^highlight^^", render: "{{元件}}", image: "圖片" }[k] || k; }
+
+// ── 打包「整篇重排版」任務給新開的 Claude Code（閘門比轉Hugo 更嚴：未歸零就不複製）──
+async function copyReformatPrompt() {
+  const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
+  const todo = countTagOnPage(TODO_TAG, pg.uid) + countTagOnPage(PROP_TAG, pg.uid);
+  const draft = countTagOnPage(DRAFT_TAG, pg.uid);
+  if (todo || draft) return toast(`未歸零：還有 ${todo} 個標記／${draft} 個草稿，先清完才能打包重排`);   // 就地擋掉、不寫剪貼簿
+  if (queryReformatProposal(pg.uid)) return toast("本頁已有排版提案，先套用或退回再重排");
+  if (pageHasPublished(pg.uid)) return toast("本頁已發佈封存，排版請直接改 Hugo");
+  const text =
+`【整篇重排版 · 排版任務】
+行為法典（第一步務必讀）：本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（§九 整篇重排版；備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）
+對象：Roam page「${pg.title}」（page uid: ${pg.uid}）
+本頁狀態：標記 0／草稿 0（已歸零，可重排）
+
+⚠️ 鐵律（凌駕一切，違反任一條＝任務失敗）：
+1. 這是「排版」不是「改稿」。Bear 的每一個字逐字保留：禁改字、禁換詞、禁增刪內容、
+   禁修錯字、禁加任何過場句。extension 會逐字機械比對，有位移＝整份提案作廢。
+2. 你只能做六件事：
+   ① 加標題：獨立 block、前綴「## 」（章節）或「### 」（小節）。標題用語取自 Bear
+      內文既有詞彙，短、具體、像 Bear 口氣；禁 AI 腔標題（「深入探討」「淺談」「總結」之類）。
+   ② 切分過長段落：只能在原有標點處切，不增刪任何字元。
+   ③ 合併零碎段落：直接串接，不得補字補標點（需要補才通順→寫進【建議】，別動手）。
+   ④ 層級化：連續平行短句縮排為子層（Roam bullet 即清單）。
+   ⑤ 整句加粗：只對「可直接抄進筆記的臨床結論／判斷整句」加 **…**，全篇新增 ≤5 處，
+      每處列進變更摘要。Bear 既有的 **、^^、[[]]、(())、{{}}、圖片連結原樣保留、不增不減。
+   ⑥ 清雜訊：刪純空白 block。
+3. 不碰：「🗂 素材／背景」子樹、「🗄」備份子樹、「✅ 已發佈」行、所有 #標記 block。
+   照片 block（![📷 …](composer.agoodbear.com/…)）逐字保留、跟著原本相鄰段落放。
+4. 禁止段落搬移／跨節重排（敘事順序是 Bear 的作者判斷）。覺得順序該動→寫進【建議】。
+5. 原稿一個 block 都不准動（不 update、不 delete、不 move）。你的全部產出只放進下述提案樹。
+
+步驟：
+1. 讀上面 PROTOCOL.md §九。
+2. 用 Roam MCP 讀整頁 ${pg.uid}（含所有 block 與層級；素材子樹讀了理解脈絡但不入結果）。
+3. 在頁面「最底部」建一個 top-level block：「#cc排版提案 【整篇重排版】${reformatDate()}」，其下：
+   - 子 block「【變更摘要】標題 +N｜切分 N｜合併 N｜加粗 N｜清空行 N」，其子層逐條列明細
+     （每個新標題全文、每處合併/切分/加粗的位置與原文前 10 字）。
+   - 子 block「【建議】」：需改字才能解的排版問題，只建議不動手（沒有就寫「無」）。
+   - 子 block「【重排結果】」：其直接子層＝重排後的完整正文樹（每個頂層段落一個 block，
+     標題 block 用 ##/### 前綴，層級用縮排）。
+4. 回 chat 一份對帳清單：各章標題＋每類變更數；若有【建議】逐條列出。
+（更多脈絡：查 Supabase handovers 最近幾筆這篇的紀錄。）`;
+  try { await navigator.clipboard.writeText(text); toast("已複製「整篇重排版」任務 ✅ 貼到新的 CC session"); }
+  catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
+}
+
+// ── 套用重排（原子三步：先備份、再促升；再驗一次歸零＋零位移）──────────────────
+async function applyReformat() {
+  const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
+  const marks = countTagOnPage(TODO_TAG, pg.uid) + countTagOnPage(PROP_TAG, pg.uid);   // 閘門①：重驗歸零（打包→回來之間可能又標了）
+  const draft = countTagOnPage(DRAFT_TAG, pg.uid);
+  if (marks || draft) return toast(`還有 ${marks} 標記／${draft} 草稿未清，不能套用`);
+  const prop = queryReformatProposal(pg.uid);                                          // 閘門②：提案存在且有【重排結果】
+  if (!prop || !prop.resultUid) return toast("找不到重排提案（或缺【重排結果】）");
+  const bodyTexts = gatherBodyBlocks(pg.uid);
+  const vr = verifyZeroDrift(bodyTexts, prop.proposalTexts);                           // 閘門③：重跑零位移驗證
+  if (!vr.ok) return toast("零位移驗證未過，已鎖住套用（請退回提案）");
+  const resultKids = ((prop.resultNode && prop.resultNode[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
+  if (!resultKids.length) return toast("【重排結果】是空的，未套用");
+  const topBody = topLevelBodyUids(pg.uid);
+  // 收集提案樹裡所有 ##／### 標題 block（含巢狀）→ 促升後轉 Roam heading 屬性、去前綴
+  const headingUpdates = [];
+  (function collect(n) {
+    const hm = (n[":block/string"] || "").match(/^\s*(#{2,3})\s+([\s\S]*)$/);
+    if (hm) headingUpdates.push({ uid: n[":block/uid"], heading: hm[1].length, string: hm[2] });
+    for (const c of (n[":block/children"] || [])) collect(c);
+  })(prop.resultNode);
+  if (topBody.length + resultKids.length > 60) toast("套用中…大頁面請稍候");   // 大頁進度提示
+  applying = true;
+  try {
+    // ① 頁底建「🗄 排版前備份 … #cc排版備份」root（collapsed）
+    const backupUid = window.roamAlphaAPI.util.generateUID();
+    await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pg.uid, order: "last" }, block: { string: `🗄 排版前備份 ${reformatStamp()} #${REFORMAT_BACKUP_TAG}`, uid: backupUid } });
+    try { await window.roamAlphaAPI.updateBlock({ block: { uid: backupUid, open: false } }); } catch (e) {}   /* 待 live 驗：updateBlock 的 open 欄位 */
+    // ② 現有正文 top-level blocks 依序搬進備份（保序：order 自己遞增指定）
+    let bo = 0;
+    for (const b of topBody) await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": backupUid, order: bo++ }, block: { uid: b.uid } });   /* 待 live 驗：moveBlock 保序 */
+    // ③ 【重排結果】直接子層促升到頁面 top-level（order 0 遞增＝排版後正文置頂）；整棵子樹跟著 move
+    let po = 0;
+    for (const k of resultKids) await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": pg.uid, order: po++ }, block: { uid: k[":block/uid"] } });   /* 待 live 驗：moveBlock 保序 */
+    // ③b ##／### → Roam heading 屬性並去前綴
+    for (const h of headingUpdates) await window.roamAlphaAPI.updateBlock({ block: { uid: h.uid, string: h.string, heading: h.heading } });   /* 待 live 驗：updateBlock 的 heading 欄位 */
+    // ③c 刪提案 root（其下 摘要/建議/已空的重排結果 一併刪）
+    await window.roamAlphaAPI.deleteBlock({ block: { uid: prop.rootUid } });
+    toast("已套用重排版（原稿備份在頁底 🗄）");
+  } catch (e) {
+    console.warn("[請CC修改] applyReformat failed", e);
+    toast("套用失敗（見 Console；原稿在備份或原位，可還原）");
+  }
+  setTimeout(() => { applying = false; closeReformatCard(); refreshDecorations(true); }, 60);
+}
+
+// ── 還原：不刪任何東西——當前正文移進新「🗄 還原前狀態」root，再把備份子樹促升回來 ──
+async function restoreReformatBackup() {
+  const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
+  const backups = queryReformatBackups(pg.uid);
+  const backup = backups.find((b) => /排版前備份/.test(b.str)) || backups[0];
+  if (!backup) return toast("找不到排版前備份");
+  let btree;
+  try { btree = window.roamAlphaAPI.pull("[:block/uid {:block/children [:block/uid :block/order]}]", [":block/uid", backup.uid]); }
+  catch (e) { return toast("讀備份失敗"); }
+  const backupKids = ((btree && btree[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
+  if (!backupKids.length) return toast("備份是空的，無法還原");
+  const curBody = topLevelBodyUids(pg.uid);   // 套用後可能已改字的當前正文 → 也保住，不默默吃掉
+  applying = true;
+  try {
+    const holdUid = window.roamAlphaAPI.util.generateUID();
+    await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pg.uid, order: "last" }, block: { string: `🗄 還原前狀態 ${reformatStamp()} #${REFORMAT_BACKUP_TAG}`, uid: holdUid } });
+    try { await window.roamAlphaAPI.updateBlock({ block: { uid: holdUid, open: false } }); } catch (e) {}   /* 待 live 驗：open */
+    let ho = 0;
+    for (const b of curBody) await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": holdUid, order: ho++ }, block: { uid: b.uid } });   /* 待 live 驗：moveBlock */
+    let po = 0;
+    for (const k of backupKids) await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": pg.uid, order: po++ }, block: { uid: k[":block/uid"] } });   /* 待 live 驗：moveBlock */
+    await window.roamAlphaAPI.deleteBlock({ block: { uid: backup.uid } });   // 刪空的舊備份 root（原稿已促升回頁面）
+    toast("已還原排版前原稿（套用後狀態存到新備份 🗄）");
+  } catch (e) {
+    console.warn("[請CC修改] restoreReformatBackup failed", e);
+    toast("還原失敗（見 Console）");
+  }
+  setTimeout(() => { applying = false; closeReformatCard(); refreshDecorations(true); }, 60);
+}
+// 🧹 清除備份（走 confirm；刪本頁所有 #cc排版備份 root）
+async function clearReformatBackup() {
+  const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
+  const backups = queryReformatBackups(pg.uid);
+  if (!backups.length) return toast("找不到排版備份");
+  if (!window.confirm("確定清除排版前備份？此動作永久刪除備份子樹，原稿將無法一鍵還原。")) return;
+  applying = true;
+  try { for (const b of backups) await window.roamAlphaAPI.deleteBlock({ block: { uid: b.uid } }); toast("已清除排版備份"); }
+  catch (e) { console.warn("[請CC修改] clearReformatBackup failed", e); toast("清除失敗（見 Console）"); }
+  setTimeout(() => { applying = false; closeReformatCard(); refreshDecorations(true); }, 60);
+}
+// ↩ 退回：刪整份提案（原稿本來就沒動過，不受影響）
+async function returnReformatProposal(prop) {
+  if (!prop || !prop.rootUid) return;
+  if (!window.confirm("退回並刪除整份重排提案？（原稿未動、不受影響；CC 需重跑才會再有提案）")) return;
+  try { await window.roamAlphaAPI.deleteBlock({ block: { uid: prop.rootUid } }); toast("已退回（刪除重排提案，原稿未動）"); }
+  catch (e) { console.warn("[請CC修改] returnReformat failed", e); toast("退回失敗（見 Console）"); }
+  setTimeout(() => { closeReformatCard(); refreshDecorations(true); }, 60);
+}
+
+// ── 👀 對照：右側欄開提案樹，主欄看原稿並排；rightSidebar 不可用就降級成捲到提案 ──
+function openReformatCompare(prop) {
+  try {
+    const rs = window.roamAlphaAPI.ui && window.roamAlphaAPI.ui.rightSidebar;
+    if (rs && rs.addWindow) {
+      rs.addWindow({ window: { type: "block", "block-uid": prop.resultUid || prop.rootUid } });   /* 待 live 驗：rightSidebar.addWindow */
+      try { rs.open(); } catch (e) {}
+      return toast("提案已開在右側欄，主欄可對照原稿");
+    }
+  } catch (e) { console.warn("[請CC修改] rightSidebar addWindow failed", e); }
+  const el = findBlockTextEl(prop.rootUid);   // 降級：捲到提案 root（不 throw、不卡住）
+  if (el) { el.scrollIntoView({ block: "center" }); toast("已捲到提案（右側欄不可用，降級為主欄捲動）"); }
+  else toast("找不到提案位置");
+}
+
+// ── 三態卡（B 待審 > C 已套用 > A 待打包）：fixed 錨在 FAB 上方，視覺同 .ccm-bubble 家族 ──
+function closeReformatCard() { if (reformatCard) { reformatCard.remove(); reformatCard = null; } }
+function reformatState(pg) {
+  const prop = queryReformatProposal(pg.uid);
+  if (prop) return { kind: "B", prop };
+  const backups = queryReformatBackups(pg.uid);
+  if (backups.length) return { kind: "C", backups };
+  return { kind: "A" };
+}
+function openReformatCard() {
+  if (reformatCard) { closeReformatCard(); return; }   // 再點一下＝關
+  const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
+  reformatCard = buildReformatCard(pg);
+  document.body.appendChild(reformatCard);
+}
+function buildReformatCard(pg) {
+  const card = document.createElement("div");
+  card.className = "ccm-reformat-card";
+  const st = reformatState(pg);
+  const closeX = `<span class="ccm-rc-x" title="關閉">✕</span>`;
+  if (st.kind === "B") {   // 提案待審：摘要＋零位移驗證＋👀對照＋✅套用（驗不過鎖住）＋↩退回
+    const prop = st.prop;
+    const vr = verifyZeroDrift(gatherBodyBlocks(pg.uid), prop.proposalTexts);   // 只在開卡時驗（不每輪跑）
+    const summary = (prop.summaryStr || "").replace(/^[\s\S]*?【變更摘要】/, "").trim() || "（無摘要）";
+    const suggest = (prop.suggestStr || "").replace(/^[\s\S]*?【建議】/, "").trim();
+    let verifyHtml;
+    if (vr.ok) verifyHtml = `<div class="ccm-rc-verify ok">零位移驗證：✅ 逐字等值（格式記號守恆）</div>`;
+    else {
+      let why;
+      if (!vr.textOk && vr.firstDiff) why = `內文位移（第 ${vr.firstDiff.pos} 字）<div class="ccm-rc-diff"><span class="old">原稿…${escapeHtml(vr.firstDiff.before)}…</span><span class="new">提案…${escapeHtml(vr.firstDiff.after)}…</span></div>`;
+      else if (!vr.counts.ok) why = "格式記號遺失：" + vr.counts.diff.map((d) => `${tokenLabel(d.kind)} 原${d.body}→提案${d.proposal}`).join("、");
+      else why = "未通過";
+      verifyHtml = `<div class="ccm-rc-verify bad">零位移驗證：❌ ${why}</div>`;
+    }
+    card.innerHTML =
+      `<div class="ccm-rc-head">📐 排版提案 · 待審 ${closeX}</div>` +
+      `<div class="ccm-rc-status">變更摘要：${escapeHtml(summary)}</div>` +
+      verifyHtml +
+      (suggest && suggest !== "無" ? `<div class="ccm-rc-suggest">💡 建議：${escapeHtml(suggest)}</div>` : "") +
+      `<div class="ccm-rc-actions"><button class="ccm-rc-compare">👀 對照</button><button class="ccm-rc-apply">✅ 套用（原稿自動備份）</button><button class="ccm-rc-return">↩ 退回</button></div>`;
+    card.querySelector(".ccm-rc-compare").onclick = () => openReformatCompare(prop);
+    const applyBtn = card.querySelector(".ccm-rc-apply");
+    if (!vr.ok) { applyBtn.disabled = true; applyBtn.classList.add("ccm-rc-disabled"); applyBtn.title = "零位移驗證未過，已鎖住（fail-closed）"; }
+    applyBtn.onclick = () => { if (vr.ok) applyReformat(); };
+    card.querySelector(".ccm-rc-return").onclick = () => returnReformatProposal(prop);
+  } else if (st.kind === "C") {   // 已套用：↺ 還原／🧹 清除備份
+    card.innerHTML =
+      `<div class="ccm-rc-head">📐 已套用重排版 ${closeX}</div>` +
+      `<div class="ccm-rc-status">原稿備份在頁底 🗄（可隨時還原）</div>` +
+      `<div class="ccm-rc-actions"><button class="ccm-rc-restore">↺ 還原排版前備份</button><button class="ccm-rc-clear">🧹 清除備份</button></div>`;
+    card.querySelector(".ccm-rc-restore").onclick = () => restoreReformatBackup();
+    card.querySelector(".ccm-rc-clear").onclick = () => clearReformatBackup();
+  } else {   // A｜尚無提案：狀態＋歸零閘門＋打包鈕
+    const todo = countTagOnPage(TODO_TAG, pg.uid), prop = countTagOnPage(PROP_TAG, pg.uid), draft = countTagOnPage(DRAFT_TAG, pg.uid);
+    const published = pageHasPublished(pg.uid);
+    const zeroed = todo + prop === 0 && draft === 0;
+    let banner;
+    if (published) banner = `<div class="ccm-rc-warn">⚠️ 本頁已發佈封存，排版請直接改 Hugo</div>`;
+    else if (!zeroed) banner = `<div class="ccm-rc-warn">⚠️ 還有 ${todo + prop} 個標記／${draft} 個草稿，先清完才能重排</div>`;
+    else banner = `<div class="ccm-rc-ok">✅ 可重排</div>`;
+    card.innerHTML =
+      `<div class="ccm-rc-head">📐 整篇重排版 ${closeX}</div>` +
+      `<div class="ccm-rc-status">本頁狀態：待處理 ${todo} · 待審 ${prop} · 草稿 ${draft}</div>` +
+      banner +
+      `<div class="ccm-rc-actions"><button class="ccm-rc-pack">📋 打包重排版任務給 CC</button></div>`;
+    const packBtn = card.querySelector(".ccm-rc-pack");
+    if (published || !zeroed) { packBtn.disabled = true; packBtn.classList.add("ccm-rc-disabled"); }
+    packBtn.onclick = () => copyReformatPrompt();
+  }
+  const x = card.querySelector(".ccm-rc-x"); if (x) x.onclick = () => closeReformatCard();
+  return card;
+}
+// 每輪輕量切換 FAB 文案（不重驗零位移，只查提案是否存在）
+function updateReformatBtn(pageUid) {
+  if (!reformatBtn) return;
+  const has = pageUid ? countTagOnPage(REFORMAT_PROP_TAG, pageUid) > 0 : false;
+  reformatBtn.textContent = has ? "📐 排版提案 ●" : "📐 重排版";
+  reformatBtn.classList.toggle("on", has);
+}
+
 // ── 從 Blog Composer 挑照片插入 ───────────────────────────────
 function openPhotoPicker(uid) {
   photoLastUid = uid;   // 第一張插在這個 block 後面，之後每張鏈在前一張後面
@@ -831,6 +1198,9 @@ function buildUI() {
 
   buildCurtain();
   fabRow = document.createElement("div"); fabRow.className = "ccm-fabrow";
+  reformatBtn = document.createElement("div"); reformatBtn.className = "ccm-fab-btn ccm-reformat-btn"; reformatBtn.textContent = "📐 重排版";
+  reformatBtn.title = "整篇重排版：打包給 CC 依內容重排（只動版面、不改一個字），提案回來後在這裡預覽＋一鍵套用。轉Hugo 前的最後整理。";
+  reformatBtn.onclick = () => openReformatCard();
   hugoBtn = document.createElement("div"); hugoBtn.className = "ccm-fab-btn ccm-hugo-btn"; hugoBtn.textContent = "🚀 轉Hugo";
   hugoBtn.title = "本頁改完了 → 打包「轉 Hugo 成稿」任務，貼給新開的 Claude Code session";
   hugoBtn.onclick = () => copyHugoPrompt();
@@ -839,7 +1209,8 @@ function buildUI() {
   curtainBtn.onclick = () => setCurtain(!curtainOn);
   toggleBtn = document.createElement("div"); toggleBtn.className = "ccm-toggle ccm-fab-btn";
   toggleBtn.title = "開 / 關標記模式（⌥M 隨時可標）"; toggleBtn.onclick = () => setActive(!active);
-  fabRow.appendChild(hugoBtn); fabRow.appendChild(curtainBtn); fabRow.appendChild(toggleBtn);
+  // DOM 順序：📐 重排版 → 🚀 轉Hugo → 🪟 審稿簾 → ✏️ 標記模式（工作流：先排版、後轉檔；開關類靠右）
+  fabRow.appendChild(reformatBtn); fabRow.appendChild(hugoBtn); fabRow.appendChild(curtainBtn); fabRow.appendChild(toggleBtn);
   document.body.appendChild(fabRow); updateToggle();
 }
 
@@ -1167,6 +1538,32 @@ function injectStyle() {
   .ccm-curtain-btn.on{background:#8a6d3b;border-color:#8a6d3b;color:#fff;box-shadow:0 4px 16px rgba(138,109,59,.35);}
   .ccm-hugo-btn{background:#e8f2ec;border:1px solid #b7dcc7;color:#1a7f54;}
   .ccm-hugo-btn:hover{background:#d7ecdf;}
+  .ccm-reformat-btn{background:#e8eef8;border:1px solid #b7c9e4;color:#2b5da0;}
+  .ccm-reformat-btn:hover{background:#dbe6f4;}
+  .ccm-reformat-btn.on{background:#2b5da0;border-color:#2b5da0;color:#fff;box-shadow:0 4px 16px rgba(43,93,160,.35);}
+  .ccm-reformat-card{position:fixed;right:18px;bottom:60px;z-index:9995;width:330px;max-width:calc(100vw - 36px);background:#fff;border:1px solid #b7c9e4;border-radius:12px;box-shadow:0 12px 34px rgba(16,22,26,.24);padding:12px 14px 13px;font-size:12.5px;line-height:1.55;color:#33404d;box-sizing:border-box;max-height:calc(100vh - 90px);overflow-y:auto;}
+  .ccm-reformat-card .ccm-rc-head{font-size:12.5px;font-weight:800;color:#2b5da0;margin-bottom:7px;display:flex;align-items:center;justify-content:space-between;}
+  .ccm-rc-x{cursor:pointer;color:#98a2ac;font-weight:700;padding:0 2px;}
+  .ccm-rc-x:hover{color:#e5484d;}
+  .ccm-rc-status{font-size:12px;color:#58636e;background:#f4f6f9;border-radius:7px;padding:5px 8px;margin-bottom:7px;}
+  .ccm-rc-warn{font-size:12px;color:#a4600b;background:#fdf3e2;border:1px solid #f0d9a8;border-radius:7px;padding:5px 8px;margin-bottom:8px;}
+  .ccm-rc-ok{font-size:12px;color:#1a7f54;background:#eef9f2;border:1px solid #bfe6cf;border-radius:7px;padding:5px 8px;margin-bottom:8px;font-weight:700;}
+  .ccm-rc-verify{font-size:12px;border-radius:7px;padding:5px 8px;margin-bottom:8px;font-weight:600;}
+  .ccm-rc-verify.ok{color:#1a7f54;background:#eef9f2;border:1px solid #bfe6cf;}
+  .ccm-rc-verify.bad{color:#a4282d;background:#fdecec;border:1px solid #f3c0c2;}
+  .ccm-rc-diff{margin-top:4px;display:flex;flex-direction:column;gap:3px;font-weight:500;}
+  .ccm-rc-diff .old{color:#8a5a5c;}
+  .ccm-rc-diff .new{color:#137a4e;}
+  .ccm-rc-suggest{font-size:12px;color:#8a6d1c;background:#fff8e6;border:1px solid #f0e0b0;border-radius:7px;padding:5px 8px;margin-bottom:8px;}
+  .ccm-rc-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
+  .ccm-rc-actions button{font-size:11.5px;cursor:pointer;border-radius:7px;padding:5px 11px;border:1px solid transparent;font-weight:700;}
+  .ccm-rc-pack,.ccm-rc-apply,.ccm-rc-restore{background:#2b5da0;color:#fff;}
+  .ccm-rc-pack:hover,.ccm-rc-apply:hover,.ccm-rc-restore:hover{background:#224e8a;}
+  .ccm-rc-compare{background:#eef2f8;color:#2b5da0;border:1px solid #c7d6ec !important;}
+  .ccm-rc-compare:hover{background:#e0e9f5;}
+  .ccm-rc-return,.ccm-rc-clear{background:#fff;color:#e5484d;border:1px solid #f3c0c2 !important;}
+  .ccm-rc-return:hover,.ccm-rc-clear:hover{background:#fdecec;}
+  .ccm-rc-disabled{opacity:.5;cursor:not-allowed !important;}
   .ccm-curtain{position:fixed;z-index:9985;pointer-events:none;border-bottom:2px dashed rgba(90,78,52,.85);}
   .ccm-curtain-edge{position:fixed;z-index:9986;height:14px;transform:translateY(-50%);pointer-events:auto;cursor:ns-resize;background:transparent;}
   .ccm-curtain-edge:hover{background:rgba(138,109,59,.18);}
@@ -1223,6 +1620,9 @@ function onload({ extensionAPI }) {
     { label: "請CC修改：上一個 (⌥↑)", callback: () => navGo(-1) },
     { label: "請CC修改：打包本頁待處理給 CC", callback: () => copyMarksPrompt() },
     { label: "請CC修改：打包『轉 Hugo 成稿』給 CC", callback: () => copyHugoPrompt() },
+    { label: "請CC修改：打包『整篇重排版』給 CC", callback: () => copyReformatPrompt() },
+    { label: "請CC修改：套用排版提案", callback: () => applyReformat() },
+    { label: "請CC修改：還原排版前備份", callback: () => restoreReformatBackup() },
     { label: "請CC修改：審稿簾 開/關", callback: () => setCurtain(!curtainOn) },
     { label: "請CC修改：重整標記", callback: () => refreshDecorations(true) },
   ];
@@ -1239,11 +1639,11 @@ function onunload() {
   if (photoPopup && !photoPopup.closed) { try { photoPopup.close(); } catch (e) {} }
   if (observer) observer.disconnect();
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
-  unpinBubble(); hideNavBubble();
+  unpinBubble(); hideNavBubble(); closeReformatCard();
   clearDecorations();
   if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); }
-  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge].forEach((e) => e && e.remove());
-  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：打包『轉 Hugo 成稿』給 CC", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
+  [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge, reformatCard].forEach((e) => e && e.remove());
+  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：打包『轉 Hugo 成稿』給 CC", "請CC修改：打包『整篇重排版』給 CC", "請CC修改：套用排版提案", "請CC修改：還原排版前備份", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
 }
