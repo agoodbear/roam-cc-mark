@@ -318,6 +318,15 @@ function positionBubble(b, anchorEl) {
   const bh = b.offsetHeight || 96;
   if (r.top - bh - 10 < 8) { b.classList.add("ccm-below"); b.style.top = (r.bottom + window.scrollY + 6) + "px"; }
   else { b.classList.remove("ccm-below"); b.style.top = (r.top + window.scrollY - 6) + "px"; }
+  // 內容很多時泡泡可能整顆頂出視窗（底部的 ✅ 套用按鈕被切掉，尤其標記在文章底部）
+  // → 依實際 render 後的 rect 垂直夾回視窗內。泡泡高度已由 CSS max-height 夾到 ≤ 視窗高，故必能完整塞進 [M, vh−M]。
+  const vh = window.innerHeight, M = 8;
+  const rect = b.getBoundingClientRect();
+  let dy = 0;
+  if (rect.bottom > vh - M) dy = (vh - M) - rect.bottom;   // 超出底部 → 整顆上移
+  if (rect.top + dy < M) dy = M - rect.top;                // 上移後又頂到視窗頂 → 貼齊頂端（按鈕仍在底部、看得到）
+  if (dy !== 0) { b.style.top = (parseFloat(b.style.top) + dy) + "px"; b.classList.add("ccm-clamped"); }
+  else b.classList.remove("ccm-clamped");
 }
 
 // ── refresh ─────────────────────────────────────────────────
@@ -579,20 +588,13 @@ function onKeyDown(e) {
     navGo(e.code === "ArrowDown" ? 1 : -1);
     return;
   }
-  // ⌥Enter＝接受目前導覽到的待審標記並自動跳下一個；⌥R＝退回
+  // ⌥Enter＝接受目前導覽到的待審標記並自動跳下一個；⌥R＝退回（與右下導覽列 ✅/↩ 鈕共用 navAccept/navReject）
   if (e.altKey && e.code === "Enter" && !e.ctrlKey && !e.metaKey) {
-    if (navCurrent && navCurrent.state === "review") {
-      e.preventDefault();
-      const noteProp = (navCurrent.intent === "查" || navCurrent.intent === "議") && navCurrent.proposal;   // 查/議整合版 → ⌥Enter 直接套用
-      acceptMark(navCurrent, noteProp ? "apply" : undefined);
-      setTimeout(() => navGo(1), 280);
-    } else if (navCurrent && navCurrent.state === "draft") {
-      e.preventDefault(); clearDraftTag(navCurrent); setTimeout(() => navGo(1), 280);   // 草稿 → ⌥Enter＝收編完成
-    }
+    if (navCurrent && (navCurrent.state === "review" || navCurrent.state === "draft")) { e.preventDefault(); navAccept(); }
     return;
   }
   if (e.altKey && e.code === "KeyR" && !e.ctrlKey && !e.metaKey) {
-    if (navCurrent && navCurrent.state === "review") { e.preventDefault(); openEdit(navCurrent, findBlockTextEl(navCurrent.parentUid)); }
+    if (navCurrent && navCurrent.state === "review") { e.preventDefault(); navReject(); }
     return;
   }
 }
@@ -817,9 +819,13 @@ function buildUI() {
     '<button class="ccm-nav-prev" title="上一個 (⌥↑)">▲</button>' +
     '<span class="ccm-nav-label">–</span>' +
     '<button class="ccm-nav-next" title="下一個 (⌥↓)">▼</button>' +
+    '<button class="ccm-nav-acc" title="接受這個 (⌥Enter)" style="display:none">✅</button>' +
+    '<button class="ccm-nav-rej" title="退回改寫 (⌥R)" style="display:none">↩</button>' +
     '<button class="ccm-nav-copy" title="打包本頁待處理標記給 CC">📋</button>';
   navEl.querySelector(".ccm-nav-prev").onclick = () => navGo(-1);
   navEl.querySelector(".ccm-nav-next").onclick = () => navGo(1);
+  navEl.querySelector(".ccm-nav-acc").onclick = () => navAccept();
+  navEl.querySelector(".ccm-nav-rej").onclick = () => navReject();
   navEl.querySelector(".ccm-nav-copy").onclick = () => copyMarksPrompt();
   document.body.appendChild(navEl);
 
@@ -867,7 +873,7 @@ function syncNav(desired) {
 }
 function navGo(dir) {
   const els = navMarks();
-  if (!els.length) { updateNavLabel(0); navCurrent = null; hideNavBubble(); return; }
+  if (!els.length) { updateNavLabel(0); navCurrent = null; hideNavBubble(); updateNavActions(); return; }
   navIdx = (navIdx + dir + els.length) % els.length;
   const el = els[navIdx];
   navScrolling = true;   // 捲動途中別讓 scrollBound 把待彈的導覽泡泡收掉（遠處標記彈不出來的元兇）
@@ -875,10 +881,33 @@ function navGo(dir) {
   const prev = el.style.background; el.style.background = "#ffd54a";
   setTimeout(() => { el.style.background = prev; }, 900);
   navCurrent = el.__ccmMark || null;
+  updateNavActions();
   setTimeout(() => { if (navCurrent && document.body.contains(el)) showNavBubble(el, navCurrent); navScrolling = false; }, 180);
   updateNavLabel(els.length);
 }
 function updateNavLabel(total) { const lbl = navEl && navEl.querySelector(".ccm-nav-label"); if (lbl) lbl.textContent = total ? (navIdx + 1) + "/" + total : "0"; }
+// 接受/退回：鍵盤（⌥Enter/⌥R）與右下導覽列 ✅/↩ 鈕共用同一段，行為一致。內容多長都在固定位置點得到，不必碰浮動泡泡。
+function navAccept() {
+  if (!navCurrent) return;
+  if (navCurrent.state === "review") {
+    const noteProp = (navCurrent.intent === "查" || navCurrent.intent === "議") && navCurrent.proposal;   // 查/議整合版 → 直接套用
+    acceptMark(navCurrent, noteProp ? "apply" : undefined);
+    setTimeout(() => navGo(1), 280);   // 接受後自動跳下一個
+  } else if (navCurrent.state === "draft") {
+    clearDraftTag(navCurrent); setTimeout(() => navGo(1), 280);   // 草稿 → 收編完成
+  }
+}
+function navReject() { if (navCurrent && navCurrent.state === "review") openEdit(navCurrent, findBlockTextEl(navCurrent.parentUid)); }
+// 導覽列 ✅/↩ 鈕依目前導覽到的標記狀態顯示：待審→兩顆都給；草稿→只給收編✅；待CC/待處理→沒有可直接接受的動作，藏起來
+function updateNavActions() {
+  if (!navEl) return;
+  const acc = navEl.querySelector(".ccm-nav-acc"), rej = navEl.querySelector(".ccm-nav-rej");
+  if (!acc || !rej) return;
+  const st = navCurrent && navCurrent.state;
+  if (st === "review") { acc.style.display = ""; rej.style.display = ""; acc.title = "接受這個 (⌥Enter)"; }
+  else if (st === "draft") { acc.style.display = ""; rej.style.display = "none"; acc.title = "收編完成 (⌥Enter)"; }
+  else { acc.style.display = "none"; rej.style.display = "none"; }
+}
 function toggleNav() { if (!navEl) return; if (navEl.style.display !== "none") { navEl.style.display = "none"; return; } navEl.style.display = "flex"; navIdx = -1; navGo(1); }
 
 // ── 開關 ─────────────────────────────────────────────────────
@@ -1056,14 +1085,15 @@ function injectStyle() {
   .ccm-overlay{position:absolute;top:0;left:0;width:0;height:0;z-index:9990;pointer-events:none;}
   .ccm-bubble{position:absolute;width:max-content;max-width:280px;background:#fff;border:1px solid #f0c453;border-radius:9px;
     box-shadow:0 6px 20px rgba(16,22,26,.18);padding:7px 11px 8px;font-size:12.5px;line-height:1.5;color:#33404d;
-    transform:translate(-50%,-100%);pointer-events:auto;z-index:9991;}
+    transform:translate(-50%,-100%);pointer-events:auto;z-index:9991;
+    display:flex;flex-direction:column;max-height:calc(100vh - 20px);box-sizing:border-box;}
   .ccm-bubble.review{border-color:#8ad9b3;}
-  .ccm-bubble .ccm-lbl{white-space:nowrap;font-size:10.5px;font-weight:800;color:#b5820c;margin-bottom:2px;}
+  .ccm-bubble .ccm-lbl{flex:none;white-space:nowrap;font-size:10.5px;font-weight:800;color:#b5820c;margin-bottom:2px;}
   .ccm-bubble.review .ccm-lbl{color:#1a7f54;}
-  .ccm-bubble .ccm-ins{font-weight:600;white-space:normal;}
+  .ccm-bubble .ccm-ins{flex:0 1 auto;min-height:0;overflow-y:auto;font-weight:600;white-space:normal;}
   .ccm-bubble.review{max-width:340px;}
   .ccm-bubble.ccm-pinned{box-shadow:0 10px 30px rgba(16,22,26,.3);outline:2px solid rgba(34,160,107,.4);}
-  .ccm-diff{display:flex;flex-direction:column;margin:3px 0 2px;border:1px solid #e6ebf0;border-radius:7px;overflow:hidden;}
+  .ccm-diff{flex:0 1 auto;min-height:0;display:flex;flex-direction:column;margin:3px 0 2px;border:1px solid #e6ebf0;border-radius:7px;overflow-y:auto;}
   .ccm-drow{display:flex;gap:6px;padding:5px 8px;font-size:12.5px;line-height:1.5;white-space:normal;}
   .ccm-drow+.ccm-drow{border-top:1px dashed #d8dee5;}
   .ccm-drow.old{background:#fdecec;}
@@ -1080,7 +1110,8 @@ function injectStyle() {
   .ccm-bubble.ccm-below{transform:translate(-50%,0);}
   .ccm-bubble.ccm-below::after{top:-7px;bottom:auto;border-top-color:transparent;border-bottom-color:#fff;filter:drop-shadow(0 -1px 0 #f0c453);}
   .ccm-bubble.review.ccm-below::after{border-bottom-color:#fff;filter:drop-shadow(0 -1px 0 #8ad9b3);}
-  .ccm-bubble .ccm-bactions{display:flex;gap:6px;margin-top:7px;}
+  .ccm-bubble.ccm-clamped::after{display:none;}   /* 被夾回視窗內時箭頭不再對準文字，藏起來免得指向空白 */
+  .ccm-bubble .ccm-bactions{flex:none;display:flex;gap:6px;margin-top:7px;}
   .ccm-bubble .ccm-bactions button{font-size:11px;cursor:pointer;border-radius:6px;padding:3px 11px;border:1px solid transparent;font-weight:700;}
   .ccm-bedit,.ccm-acc{background:#2b7de0;color:#fff;}
   .ccm-acc{background:#22a06b;}
@@ -1123,6 +1154,10 @@ function injectStyle() {
   .ccm-nav{position:fixed;right:18px;bottom:98px;z-index:9994;display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #d5dbe2;border-radius:999px;padding:4px 8px;box-shadow:0 4px 14px rgba(16,22,26,.16);}
   .ccm-nav button{width:26px;height:26px;border:none;border-radius:50%;background:#eef2f6;color:#37424d;cursor:pointer;font-size:12px;line-height:1;}
   .ccm-nav button:hover{background:#2b7de0;color:#fff;}
+  .ccm-nav button.ccm-nav-acc{background:#e3f6ec;}
+  .ccm-nav button.ccm-nav-acc:hover{background:#22a06b;color:#fff;}
+  .ccm-nav button.ccm-nav-rej{background:#fbeede;}
+  .ccm-nav button.ccm-nav-rej:hover{background:#e0a94b;color:#fff;}
   .ccm-nav-label{font-size:12px;font-weight:700;color:#58636e;min-width:34px;text-align:center;}
   .ccm-fabrow{position:fixed;right:18px;bottom:18px;z-index:9994;display:flex;align-items:center;gap:8px;}
   .ccm-fab-btn{font-size:12.5px;font-weight:700;padding:6px 13px;border-radius:999px;box-shadow:0 4px 14px rgba(16,22,26,.14);cursor:pointer;user-select:none;white-space:nowrap;}
@@ -1193,7 +1228,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v2 loaded");
+  console.log("[請CC修改] v3 loaded — 導覽列 ✅接受/↩退回 鈕 + 泡泡 max-height");
+  setTimeout(() => toast("請CC修改 v3 已載入：導覽列多了 ✅接受 / ↩退回"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
