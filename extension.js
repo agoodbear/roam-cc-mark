@@ -706,9 +706,19 @@ function countTagOnPage(tag, pageUid) {
     return (r && r[0] && r[0][0]) || 0;
   } catch (e) { return 0; }
 }
+// 「真標記」計數：#請cc修改/#cc提案 的真標記一定是「有文字父 block 的子 block」（extension 建的 child mark）。
+// 跟顯示層 queryByTag 一致，排除「說明文字裡順口提到 tag」的頂層 block（如 boilerplate「改稿方式…#請cc修改」）——那不是待處理標記、不該擋住重排/轉Hugo。
+// 2026-07-19 live 驗：本頁 :block/page 計數=1(誤含 boilerplate)、require-parent=0(＝pill 顯示)。草稿不走這個（草稿可頂層、要算），維持 countTagOnPage。
+function countMarkTag(tag, pageUid) {
+  try {
+    const r = window.roamAlphaAPI.q(
+      `[:find (count ?c) :where [?t :node/title "${tag}"] [?c :block/refs ?t] [?c :block/page ?pg] [?pg :block/uid "${pageUid}"] [?parent :block/children ?c] [?parent :block/string ?ps]]`);
+    return (r && r[0] && r[0][0]) || 0;
+  } catch (e) { return 0; }
+}
 async function copyHugoPrompt() {
   const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
-  const todo = countTagOnPage(TODO_TAG, pg.uid) + countTagOnPage(PROP_TAG, pg.uid);
+  const todo = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);
   const draft = countTagOnPage(DRAFT_TAG, pg.uid);
   const ready = todo === 0 && draft === 0;
   const text =
@@ -850,7 +860,7 @@ function tokenLabel(k) { return { link: "[[連結]]", blockref: "((引用))", hi
 // ── 打包「整篇重排版」任務給新開的 Claude Code（閘門比轉Hugo 更嚴：未歸零就不複製）──
 async function copyReformatPrompt() {
   const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
-  const todo = countTagOnPage(TODO_TAG, pg.uid) + countTagOnPage(PROP_TAG, pg.uid);
+  const todo = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);
   const draft = countTagOnPage(DRAFT_TAG, pg.uid);
   if (todo || draft) return toast(`未歸零：還有 ${todo} 個標記／${draft} 個草稿，先清完才能打包重排`);   // 就地擋掉、不寫剪貼簿
   if (queryReformatProposal(pg.uid)) return toast("本頁已有排版提案，先套用或退回再重排");
@@ -896,7 +906,7 @@ async function copyReformatPrompt() {
 // ── 套用重排（原子三步：先備份、再促升；再驗一次歸零＋零位移）──────────────────
 async function applyReformat() {
   const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
-  const marks = countTagOnPage(TODO_TAG, pg.uid) + countTagOnPage(PROP_TAG, pg.uid);   // 閘門①：重驗歸零（打包→回來之間可能又標了）
+  const marks = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);   // 閘門①：重驗歸零（真標記，排除說明文字裡提到 tag 的 boilerplate）
   const draft = countTagOnPage(DRAFT_TAG, pg.uid);
   if (marks || draft) return toast(`還有 ${marks} 標記／${draft} 草稿未清，不能套用`);
   const prop = queryReformatProposal(pg.uid);                                          // 閘門②：提案存在且有【重排結果】
@@ -1056,7 +1066,7 @@ function buildReformatCard(pg) {
     card.querySelector(".ccm-rc-restore").onclick = () => restoreReformatBackup();
     card.querySelector(".ccm-rc-clear").onclick = () => clearReformatBackup();
   } else {   // A｜尚無提案：狀態＋歸零閘門＋打包鈕
-    const todo = countTagOnPage(TODO_TAG, pg.uid), prop = countTagOnPage(PROP_TAG, pg.uid), draft = countTagOnPage(DRAFT_TAG, pg.uid);
+    const todo = countMarkTag(TODO_TAG, pg.uid), prop = countMarkTag(PROP_TAG, pg.uid), draft = countTagOnPage(DRAFT_TAG, pg.uid);
     const published = pageHasPublished(pg.uid);
     const zeroed = todo + prop === 0 && draft === 0;
     let banner;
