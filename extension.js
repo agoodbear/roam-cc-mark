@@ -454,6 +454,26 @@ function replaceNth(str, needle, repl, n) {
   for (let i = 0; i < n; i++) { idx = str.indexOf(needle, from); if (idx === -1) return null; from = idx + needle.length; }
   return str.slice(0, idx) + repl + str.slice(idx + needle.length);
 }
+/** 這個 block 是不是標題（Roam heading 屬性 1–3）。0＝一般段落。 */
+function blockHeading(uid) {
+  try { const r = window.roamAlphaAPI.pull("[:block/heading]", [":block/uid", uid]); return (r && r[":block/heading"]) || 0; }
+  catch (e) { return 0; }
+}
+
+/**
+ * 標題底下第一個「正文」子 block（跳過標記 block 本身）。
+ * 用在：使用者把標記標在標題那一行時，真正想改的多半是底下的內容。
+ */
+function firstBodyChildUid(uid) {
+  try {
+    const res = window.roamAlphaAPI.q(`[:find ?cu ?ord ?s :where [?b :block/uid "${uid}"] [?b :block/children ?c] [?c :block/uid ?cu] [?c :block/order ?ord] [?c :block/string ?s]]`);
+    if (!res || !res.length) return null;
+    const rows = res.slice().sort((a, b) => a[1] - b[1]);
+    for (const r of rows) if (!/#(?:請cc修改|cc提案|cc草稿|\[\[(?:請cc修改|cc提案|cc草稿)\]\])/.test(r[2] || "")) return r[0];
+    return null;
+  } catch (e) { return null; }
+}
+
 function siblingAfter(uid) {
   try {
     const res = window.roamAlphaAPI.q(`[:find ?gpu ?ord :where [?b :block/uid "${uid}"] [?b :block/order ?ord] [?gp :block/children ?b] [?gp :block/uid ?gpu]]`);
@@ -478,7 +498,11 @@ async function acceptMark(m, mode) {
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
       toast("已接受並套用");
     } else if (!mode && m.intent === "接" && m.proposal) {
-      const pos = siblingAfter(m.parentUid);
+      // 標記掛在標題上時，草稿要落在「那一節的最後」。插在標題的兄弟位置會掉到整節外面，
+      // 跟後面的小節平起平坐（2026-08-28 實際踩過：三段草稿全部插錯層）。
+      const pos = blockHeading(m.parentUid) > 0
+        ? { parent: m.parentUid, order: "last" }
+        : siblingAfter(m.parentUid);
       await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pos.parent, order: pos.order }, block: { string: m.proposal + " #" + DRAFT_TAG } });
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
       toast("已插入草稿（掛 #cc草稿，記得改寫收編）");
@@ -560,6 +584,19 @@ function selectionRect() {
 function markFromSelection(x, y, viaKeyboard, forceIntent) {
   const cap = captureSelection(viaKeyboard);
   if (!cap) { hidePanel(); hideTrigger(); return false; }
+  // 標到「整行標題」時先問一句：多數情況要改的是底下的內容，不是標題本身。
+  // 掛錯層級的後果很隱蔽——潤會改到標題、接會插到節外，所以在源頭擋。
+  if (!forceIntent && cap.marks.length === 1 && !cap.marks[0].quote && blockHeading(cap.marks[0].parentUid) > 0) {
+    const body = firstBodyChildUid(cap.marks[0].parentUid);
+    if (body) {
+      const useBody = window.confirm(
+        "你標的是一行標題。\n\n要改的是「底下的內容」還是「標題本身」？\n\n" +
+        "確定 ＝ 底下的內容（標記改掛到這一節的第一段）\n" +
+        "取消 ＝ 標題本身"
+      );
+      if (useBody) { cap.marks[0].parentUid = body; cap.label = "這一節的內容（整段）"; }
+    }
+  }
   pending = { mode: "create", marks: cap.marks, label: cap.label };
   panelIntent = forceIntent || "潤";
   const label = forceIntent === "接" ? "（在此 block 後面插入新段）" : cap.label;
