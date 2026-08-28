@@ -353,18 +353,20 @@ function clearDecorations() {
     e.classList.remove("ccm-block-flag", "ccm-block-flag-review", "ccm-block-flag-draft");
     delete e.dataset.ccmChild; delete e.dataset.state; e.__ccmMark = null;   // 清掉，鬼泡泡的 hover 讀不到舊 mark
   });
-  document.querySelectorAll(".ccm-mark-hidden").forEach((e) => e.classList.remove("ccm-mark-hidden"));
+  document.querySelectorAll(".ccm-mark-row").forEach((e) => e.classList.remove("ccm-mark-row"));
   overlayEl.innerHTML = "";
   hoverBubble = null; hoverAnchor = null;   // navBubble 在 body、不在 overlay，別在這裡清（交給 syncNav）
   if (hoverHideT) { clearTimeout(hoverHideT); hoverHideT = null; }
 }
 
-// 把「標記 child block」那一列藏起來（只藏顯示、資料不動；inline 手打 tag 的不藏，那是正文）
-function hideChildBlock(childUid) {
+// 把「標記 child block」那一列標示出來（2026-08-28 起「顯示」不再隱藏：Bear 要在 Roam 裡
+// 直接看到自己寫了什麼指令。這個 class 現在只負責視覺區分，不再 display:none。
+// inline 手打 tag 的不標，那是正文。）
+function flagChildBlock(childUid) {
   const el = findBlockTextEl(childUid);
   if (!el) return;
   const c = el.closest(".roam-block-container") || el.closest(".rm-block");
-  if (c) c.classList.add("ccm-mark-hidden");
+  if (c) c.classList.add("ccm-mark-row");
 }
 
 function refreshDecorations(force) {
@@ -417,7 +419,7 @@ function refreshDecorations(force) {
 
   applying = true;
   clearDecorations();
-  for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) hideChildBlock(m.childUid); }
+  for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) flagChildBlock(m.childUid); }
   updatePill(todoCount, reviewCount, draftCount);
   updateReformatBtn(pageUid);
   syncPinned(desired); syncNav(desired);
@@ -1462,7 +1464,8 @@ function injectStyle() {
   .ccm-bubble.draft{border-color:#b7b0ee;}
   .ccm-bubble.draft .ccm-lbl{color:#5a4bc4;}
   .ccm-bubble.draft::after{filter:drop-shadow(0 1px 0 #b7b0ee);}
-  .ccm-mark-hidden{display:none !important;}
+  /* 標記列＝可見（原本 display:none，2026-08-28 改）。只做視覺區分，內容一律看得到 */
+  .ccm-mark-row{background:#fffaf0;box-shadow:inset 3px 0 0 #f0a020;border-radius:4px;}
   .ccm-overlay{position:absolute;top:0;left:0;width:0;height:0;z-index:9990;pointer-events:none;}
   .ccm-bubble{position:absolute;width:max-content;max-width:280px;background:#fff;border:1px solid #f0c453;border-radius:9px;
     box-shadow:0 6px 20px rgba(16,22,26,.18);padding:7px 11px 8px;font-size:12.5px;line-height:1.5;color:#33404d;
