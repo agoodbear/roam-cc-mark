@@ -34,6 +34,7 @@ let photoPopup = null, photoLastUid = null;   // Blog Composer 照片 picker：�
 let fabRow = null, curtainBtn = null, hugoBtn = null, reformatBtn = null, reformatCard = null;   // reformatBtn=FAB 第4顆；reformatCard=三態卡（fixed，錨在 FAB 上方）
 let curtainOn = false, curtainEl = null, curtainGrip = null, curtainEdge = null;   // 審稿簾：蓋住已審區、握把/虛線拖曳追蹤進度
 let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null, curtainDragY = 0;   // curtainDragY=拖曳中游標最後的視窗 Y（滾輪捲頁時線要留在游標下）
+let curtainCapture = null, refreshDeferred = false;   // 拖曳中 pointer 鎖在哪個元素；拖曳期間被凍結的 refresh 要不要在放開後補跑
 let curtainByPage = {}, curtainPageUid = null, curtainRangeCache = null;   // 每頁各自記「審到哪個 block」＋原稿頭尾範圍（算進度%）
 const CURTAIN_TOP = "^top";   // curtainByPage 的哨兵值：這頁審稿線歸零（從頭開始），不是 block uid
 
@@ -372,6 +373,7 @@ function flagChildBlock(childUid) {
 
 function refreshDecorations(force) {
   if (!overlayEl) return;
+  if (curtainDragging && !force) { refreshDeferred = true; return; }   // 拖曳中不跑（跨 graph 查詢會讓拖曳頓），放開後補
   // 換頁時把審稿簾還原到「這頁上次審到的那段」（本頁沒記錄就停在原位）；內容變了→進度%範圍重算
   if (curtainOn) {
     curtainRangeCache = null;
@@ -1347,8 +1349,14 @@ function curtainScrollerEl() {
 }
 function curtainStartDrag(e) {
   e.preventDefault(); e.stopPropagation(); curtainDragging = true; curtainDragY = e.clientY;
+  // 拖曳順暢的關鍵：把 pointer 鎖在握把上。否則游標掃過的每一段都在觸發 hover（Roam 的 bullet 控制列、
+  // 我們的標記泡泡）→ DOM 一直變 → MutationObserver → refreshDecorations 跑跨 graph 的 datalog 查詢 → 頓一下。
+  curtainCapture = null;
+  try { if (e.pointerId != null && e.currentTarget && e.currentTarget.setPointerCapture) { e.currentTarget.setPointerCapture(e.pointerId); curtainCapture = { el: e.currentTarget, id: e.pointerId }; } } catch (err) {}
+  removeHoverBubble();
   document.addEventListener("pointermove", curtainDragMove);
   document.addEventListener("pointerup", curtainDragEnd);
+  document.addEventListener("pointercancel", curtainDragEnd);
   document.addEventListener("wheel", curtainWheel, { capture: true, passive: false });   // 拖曳中滾輪：捲頁＋線跟游標
 }
 // 主欄真正的捲動容器：Roam site.css 是 .rm-article-wrapper{height:100%;overflow-y:scroll}；保險起見再往上找一層真的會捲的
@@ -1481,7 +1489,10 @@ function curtainDragEnd() {
   curtainDragging = false;
   document.removeEventListener("pointermove", curtainDragMove);
   document.removeEventListener("pointerup", curtainDragEnd);
+  document.removeEventListener("pointercancel", curtainDragEnd);
   document.removeEventListener("wheel", curtainWheel, { capture: true });
+  if (curtainCapture) { try { curtainCapture.el.releasePointerCapture(curtainCapture.id); } catch (e) {} curtainCapture = null; }
+  if (refreshDeferred) { refreshDeferred = false; debouncedRefresh(); }   // 拖曳期間凍結的 refresh 補跑一次
   try { api.settings.set("curtainAnchor", Math.round(curtainAnchor)); } catch (e) {}
   // 把「審到這條線」錨定到某個 block（穩定、跨螢幕/跨電腦），依「本頁」分開記
   const pg = currentOpenUid();
@@ -1745,8 +1756,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v6 loaded — 拖曳審稿線時滾輪可捲頁、線跟著游標；滾輪打在握把/虛線上也能捲");
-  setTimeout(() => toast("請CC修改 v6 已載入：拖著審稿線滾滾輪，頁面會捲、線跟著游標"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v7 loaded — 拖曳審稿線改 pointer capture＋凍結 refresh，拖起來不頓");
+  setTimeout(() => toast("請CC修改 v7 已載入：審稿線拖曳改順了"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
@@ -1758,7 +1769,7 @@ function onunload() {
   if (scrollBound) { window.removeEventListener("scroll", scrollBound, true); window.removeEventListener("resize", scrollBound); }
   unpinBubble(); hideNavBubble(); closeReformatCard();
   clearDecorations();
-  if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); document.removeEventListener("wheel", curtainWheel, { capture: true }); }
+  if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); document.removeEventListener("pointercancel", curtainDragEnd); document.removeEventListener("wheel", curtainWheel, { capture: true }); if (curtainCapture) { try { curtainCapture.el.releasePointerCapture(curtainCapture.id); } catch (e) {} curtainCapture = null; } }
   [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge, reformatCard].forEach((e) => e && e.remove());
   const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：打包『轉 Hugo 成稿』給 CC", "請CC修改：打包『整篇重排版』給 CC", "請CC修改：套用排版提案", "請CC修改：還原排版前備份", "請CC修改：審稿簾 開/關", "請CC修改：回到文章最上面", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
