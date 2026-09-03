@@ -1359,6 +1359,7 @@ function buildCurtain() {
   document.body.appendChild(curtainEdge);
   curtainGrip = document.createElement("div"); curtainGrip.className = "ccm-curtain-grip"; curtainGrip.style.display = "none";
   curtainGrip.innerHTML =
+    '<span class="ccm-cg-top" title="回到文章最上面">⤒</span>' +
     '<span class="ccm-cg-op" title="更透明">－</span>' +
     '<span class="ccm-cg-label" title="拖曳＝移動審稿線；數字＝審稿進度（拉到最後一段＝100%）">⬍ 審到這</span>' +
     '<span class="ccm-cg-op" title="更濃">＋</span>' +
@@ -1368,7 +1369,17 @@ function buildCurtain() {
   ops[0].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity - 0.06); };
   ops[1].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity + 0.06); };
   curtainGrip.querySelector(".ccm-cg-x").onclick = (e) => { e.stopPropagation(); setCurtain(false); };
+  curtainGrip.querySelector(".ccm-cg-top").onclick = (e) => { e.stopPropagation(); scrollArticleTop(); };
   document.body.appendChild(curtainGrip);
+}
+// 回到文章最上面：只捲主欄，不動審稿線（進度照舊）。Roam 換頁常沿用上一頁的捲動位置，
+// 從儲藏室清單底部點進新稿就會落在最下面，這顆鈕免得一路往上捲。
+function scrollArticleTop() {
+  const sc = curtainScroller || curtainScrollerEl();
+  const smooth = { top: 0, left: 0, behavior: "smooth" };
+  try { if (curtainIsDoc(sc)) window.scrollTo(smooth); else sc.scrollTo(smooth); }
+  catch (e) { if (curtainIsDoc(sc)) window.scrollTo(0, 0); else sc.scrollTop = 0; }
+  if (!curtainIsDoc(sc)) { try { window.scrollTo(0, 0); } catch (e) {} }   // 兜底：真正的捲動容器若是 window 也歸零
 }
 function setCurtainOpacity(v) {
   curtainOpacity = Math.max(0.08, Math.min(0.7, v));
@@ -1619,8 +1630,9 @@ function injectStyle() {
   .ccm-curtain-edge:hover{background:rgba(138,109,59,.18);}
   .ccm-curtain-grip{position:fixed;z-index:9986;transform:translate(-100%,-50%);display:flex;align-items:center;gap:2px;background:#8a6d3b;color:#fff;font-size:11px;font-weight:800;padding:3px 5px 3px 7px;border-radius:9px 0 0 9px;box-shadow:0 2px 8px rgba(0,0,0,.28);user-select:none;white-space:nowrap;}
   .ccm-curtain-grip .ccm-cg-label{cursor:ns-resize;padding:0 4px;}
-  .ccm-curtain-grip .ccm-cg-op,.ccm-curtain-grip .ccm-cg-x{cursor:pointer;width:17px;height:17px;line-height:17px;text-align:center;border-radius:5px;background:rgba(255,255,255,.16);font-size:12px;}
-  .ccm-curtain-grip .ccm-cg-op:hover,.ccm-curtain-grip .ccm-cg-x:hover{background:rgba(255,255,255,.32);}
+  .ccm-curtain-grip .ccm-cg-op,.ccm-curtain-grip .ccm-cg-x,.ccm-curtain-grip .ccm-cg-top{cursor:pointer;width:17px;height:17px;line-height:17px;text-align:center;border-radius:5px;background:rgba(255,255,255,.16);font-size:12px;}
+  .ccm-curtain-grip .ccm-cg-op:hover,.ccm-curtain-grip .ccm-cg-x:hover,.ccm-curtain-grip .ccm-cg-top:hover{background:rgba(255,255,255,.32);}
+  .ccm-curtain-grip .ccm-cg-top{margin-right:3px;font-size:13px;}
   .ccm-toast{position:fixed;left:50%;bottom:46px;transform:translateX(-50%);z-index:9998;background:#1f2937;color:#fff;font-size:12.5px;font-weight:600;padding:8px 16px;border-radius:999px;box-shadow:0 6px 20px rgba(16,22,26,.3);opacity:1;transition:opacity .4s;pointer-events:none;}
   `;
   document.head.appendChild(styleEl);
@@ -1674,12 +1686,13 @@ function onload({ extensionAPI }) {
     { label: "請CC修改：套用排版提案", callback: () => applyReformat() },
     { label: "請CC修改：還原排版前備份", callback: () => restoreReformatBackup() },
     { label: "請CC修改：審稿簾 開/關", callback: () => setCurtain(!curtainOn) },
+    { label: "請CC修改：回到文章最上面", callback: () => scrollArticleTop() },
     { label: "請CC修改：重整標記", callback: () => refreshDecorations(true) },
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v3 loaded — 導覽列 ✅接受/↩退回 鈕 + 泡泡 max-height");
-  setTimeout(() => toast("請CC修改 v3 已載入：導覽列多了 ✅接受 / ↩退回"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v4 loaded — 審稿簾握把多了 ⤒ 回到文章最上面");
+  setTimeout(() => toast("請CC修改 v4 已載入：審稿簾握把多了 ⤒ 回到最上面"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
@@ -1693,7 +1706,7 @@ function onunload() {
   clearDecorations();
   if (curtainDragging) { document.removeEventListener("pointermove", curtainDragMove); document.removeEventListener("pointerup", curtainDragEnd); }
   [styleEl, overlayEl, panelEl, pillEl, triggerBtn, fabRow, navEl, curtainEl, curtainGrip, curtainEdge, reformatCard].forEach((e) => e && e.remove());
-  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：打包『轉 Hugo 成稿』給 CC", "請CC修改：打包『整篇重排版』給 CC", "請CC修改：套用排版提案", "請CC修改：還原排版前備份", "請CC修改：審稿簾 開/關", "請CC修改：重整標記"];
+  const labels = ["請CC修改：開關標記模式", "請CC修改：標記游標處 (⌥M)", "請CC修改：在游標 block 後插入新段 (⌥N)", "請CC修改：下一個 (⌥↓)", "請CC修改：上一個 (⌥↑)", "請CC修改：打包本頁待處理給 CC", "請CC修改：打包『轉 Hugo 成稿』給 CC", "請CC修改：打包『整篇重排版』給 CC", "請CC修改：套用排版提案", "請CC修改：還原排版前備份", "請CC修改：審稿簾 開/關", "請CC修改：回到文章最上面", "請CC修改：重整標記"];
   try { labels.forEach((l) => window.roamAlphaAPI.ui.commandPalette.removeCommand({ label: l })); } catch (e) {}
   console.log("[請CC修改] unloaded");
 }
