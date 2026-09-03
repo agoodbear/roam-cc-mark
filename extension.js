@@ -1755,8 +1755,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v7 loaded — 拖曳審稿線改 pointer capture＋凍結 refresh，拖起來不頓");
-  setTimeout(() => toast("請CC修改 v7 已載入：審稿線拖曳改順了"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v8 loaded — 📐 Roam重排版：套用不留備份、按鈕改名");
+  setTimeout(() => toast("請CC修改 v8 已載入：Roam重排版套用不留備份"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
