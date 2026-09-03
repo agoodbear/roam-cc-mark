@@ -945,7 +945,9 @@ async function copyReformatPrompt() {
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
 }
 
-// ── 套用重排（原子三步：先備份、再促升；再驗一次歸零＋零位移）──────────────────
+// ── 套用重排（先促升提案樹、再刪舊正文；套用前再驗一次歸零＋零位移）──────────────────
+// 2026-09-03 Bear 決定不留備份：零位移已逐字驗證，同頁存第二份原稿是多此一舉。
+// ↺ 還原／🧹 清備份保留給更早留下的舊備份用。
 async function applyReformat() {
   const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
   const marks = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);   // 閘門①：重驗歸零（真標記，排除說明文字裡提到 tag 的 boilerplate）
@@ -968,25 +970,22 @@ async function applyReformat() {
   })(prop.resultNode);
   if (topBody.length + resultKids.length > 60) toast("套用中…大頁面請稍候");   // 大頁進度提示
   applying = true;
+  let promoted = 0, removed = 0;
   try {
-    // ① 頁底建「🗄 排版前備份 … #cc排版備份」root（collapsed）
-    const backupUid = window.roamAlphaAPI.util.generateUID();
-    await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pg.uid, order: "last" }, block: { string: `🗄 排版前備份 ${reformatStamp()} #${REFORMAT_BACKUP_TAG}`, uid: backupUid } });
-    try { await window.roamAlphaAPI.updateBlock({ block: { uid: backupUid, open: false } }); } catch (e) {}   /* 待 live 驗：updateBlock 的 open 欄位 */
-    // ② 現有正文 top-level blocks 依序搬進備份（保序：order 自己遞增指定）
-    let bo = 0;
-    for (const b of topBody) await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": backupUid, order: bo++ }, block: { uid: b.uid } });   /* 待 live 驗：moveBlock 保序 */
-    // ③ 【重排結果】直接子層促升到頁面 top-level（order 0 遞增＝排版後正文置頂）；整棵子樹跟著 move
+    // ① 【重排結果】直接子層促升到頁面 top-level（order 0 遞增＝排版後正文置頂）；整棵子樹跟著 move。舊正文此時還在原位、只是被推到後面
     let po = 0;
-    for (const k of resultKids) await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": pg.uid, order: po++ }, block: { uid: k[":block/uid"] } });   /* 待 live 驗：moveBlock 保序 */
-    // ③b ##／### → Roam heading 屬性並去前綴
+    for (const k of resultKids) { await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": pg.uid, order: po++ }, block: { uid: k[":block/uid"] } }); promoted++; }   /* 待 live 驗：moveBlock 保序 */
+    // ①b ##／### → Roam heading 屬性並去前綴
     for (const h of headingUpdates) await window.roamAlphaAPI.updateBlock({ block: { uid: h.uid, string: h.string, heading: h.heading } });   /* 待 live 驗：updateBlock 的 heading 欄位 */
-    // ③c 刪提案 root（其下 摘要/建議/已空的重排結果 一併刪）
+    // ② 新版全數就位後才刪舊正文（整棵子樹）；不留備份——零位移驗證已保證逐字等值
+    for (const b of topBody) { await window.roamAlphaAPI.deleteBlock({ block: { uid: b.uid } }); removed++; }
+    // ③ 刪提案 root（其下 摘要/建議/已空的重排結果 一併刪）
     await window.roamAlphaAPI.deleteBlock({ block: { uid: prop.rootUid } });
-    toast("已套用重排版（原稿備份在頁底 🗄）");
+    toast(`已套用重排版（新版 ${promoted} 段就位，舊正文 ${removed} 段已刪、不留備份）`);
   } catch (e) {
     console.warn("[請CC修改] applyReformat failed", e);
-    toast("套用失敗（見 Console；原稿在備份或原位，可還原）");
+    if (promoted < resultKids.length) toast("套用失敗（見 Console）：新版只促升了一部分，舊正文仍在原位未刪，請手動整理");
+    else toast(`套用中斷（見 Console）：新版已就位，舊正文刪了 ${removed}/${topBody.length} 段，剩下的在頁面下方請手動刪`);
   }
   setTimeout(() => { applying = false; closeReformatCard(); refreshDecorations(true); }, 60);
 }
@@ -1090,11 +1089,11 @@ function buildReformatCard(pg) {
       verifyHtml = `<div class="ccm-rc-verify bad">零位移驗證：❌ ${why}</div>`;
     }
     card.innerHTML =
-      `<div class="ccm-rc-head">📐 排版提案 · 待審 ${closeX}</div>` +
+      `<div class="ccm-rc-head">📐 Roam 排版提案 · 待審 ${closeX}</div>` +
       `<div class="ccm-rc-status">變更摘要：${escapeHtml(summary)}</div>` +
       verifyHtml +
       (suggest && suggest !== "無" ? `<div class="ccm-rc-suggest">💡 建議：${escapeHtml(suggest)}</div>` : "") +
-      `<div class="ccm-rc-actions"><button class="ccm-rc-compare">👀 對照</button><button class="ccm-rc-apply">✅ 套用（原稿自動備份）</button><button class="ccm-rc-return">↩ 退回</button></div>`;
+      `<div class="ccm-rc-actions"><button class="ccm-rc-compare">👀 對照</button><button class="ccm-rc-apply">✅ 套用（不留備份）</button><button class="ccm-rc-return">↩ 退回</button></div>`;
     card.querySelector(".ccm-rc-compare").onclick = () => openReformatCompare(prop);
     const applyBtn = card.querySelector(".ccm-rc-apply");
     if (!vr.ok) { applyBtn.disabled = true; applyBtn.classList.add("ccm-rc-disabled"); applyBtn.title = "零位移驗證未過，已鎖住（fail-closed）"; }
@@ -1102,8 +1101,8 @@ function buildReformatCard(pg) {
     card.querySelector(".ccm-rc-return").onclick = () => returnReformatProposal(prop);
   } else if (st.kind === "C") {   // 已套用：↺ 還原／🧹 清除備份
     card.innerHTML =
-      `<div class="ccm-rc-head">📐 已套用重排版 ${closeX}</div>` +
-      `<div class="ccm-rc-status">原稿備份在頁底 🗄（可隨時還原）</div>` +
+      `<div class="ccm-rc-head">📐 Roam 已套用重排版 ${closeX}</div>` +
+      `<div class="ccm-rc-status">頁底有舊版留下的 🗄 備份（2026-09-03 起套用已不再建備份）</div>` +
       `<div class="ccm-rc-actions"><button class="ccm-rc-restore">↺ 還原排版前備份</button><button class="ccm-rc-clear">🧹 清除備份</button></div>`;
     card.querySelector(".ccm-rc-restore").onclick = () => restoreReformatBackup();
     card.querySelector(".ccm-rc-clear").onclick = () => clearReformatBackup();
@@ -1116,7 +1115,7 @@ function buildReformatCard(pg) {
     else if (!zeroed) banner = `<div class="ccm-rc-warn">⚠️ 還有 ${todo + prop} 個標記／${draft} 個草稿，先清完才能重排</div>`;
     else banner = `<div class="ccm-rc-ok">✅ 可重排</div>`;
     card.innerHTML =
-      `<div class="ccm-rc-head">📐 整篇重排版 ${closeX}</div>` +
+      `<div class="ccm-rc-head">📐 Roam 整篇重排版 ${closeX}</div>` +
       `<div class="ccm-rc-status">本頁狀態：待處理 ${todo} · 待審 ${prop} · 草稿 ${draft}</div>` +
       banner +
       `<div class="ccm-rc-actions"><button class="ccm-rc-pack">📋 打包重排版任務給 CC</button></div>`;
@@ -1131,7 +1130,7 @@ function buildReformatCard(pg) {
 function updateReformatBtn(pageUid) {
   if (!reformatBtn) return;
   const has = pageUid ? countTagOnPage(REFORMAT_PROP_TAG, pageUid) > 0 : false;
-  reformatBtn.textContent = has ? "📐 排版提案 ●" : "📐 重排版";
+  reformatBtn.textContent = has ? "📐 Roam排版提案 ●" : "📐 Roam重排版";
   reformatBtn.classList.toggle("on", has);
 }
 
@@ -1250,7 +1249,7 @@ function buildUI() {
 
   buildCurtain();
   fabRow = document.createElement("div"); fabRow.className = "ccm-fabrow";
-  reformatBtn = document.createElement("div"); reformatBtn.className = "ccm-fab-btn ccm-reformat-btn"; reformatBtn.textContent = "📐 重排版";
+  reformatBtn = document.createElement("div"); reformatBtn.className = "ccm-fab-btn ccm-reformat-btn"; reformatBtn.textContent = "📐 Roam重排版";
   reformatBtn.title = "整篇重排版：打包給 CC 依內容重排（只動版面、不改一個字），提案回來後在這裡預覽＋一鍵套用。轉Hugo 前的最後整理。";
   reformatBtn.onclick = () => openReformatCard();
   hugoBtn = document.createElement("div"); hugoBtn.className = "ccm-fab-btn ccm-hugo-btn"; hugoBtn.textContent = "🚀 轉Hugo";
