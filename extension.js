@@ -35,6 +35,7 @@ let fabRow = null, curtainBtn = null, hugoBtn = null, reformatBtn = null, reform
 let curtainOn = false, curtainEl = null, curtainGrip = null, curtainEdge = null;   // 審稿簾：蓋住已審區、握把/虛線拖曳追蹤進度
 let curtainAnchor = 240, curtainOpacity = 0.4, curtainDragging = false, curtainScroller = null;
 let curtainByPage = {}, curtainPageUid = null, curtainRangeCache = null;   // 每頁各自記「審到哪個 block」＋原稿頭尾範圍（算進度%）
+const CURTAIN_TOP = "^top";   // curtainByPage 的哨兵值：這頁審稿線歸零（從頭開始），不是 block uid
 
 // ── util ──────────────────────────────────────────────────────
 function uidFromId(el) {
@@ -1359,7 +1360,7 @@ function buildCurtain() {
   document.body.appendChild(curtainEdge);
   curtainGrip = document.createElement("div"); curtainGrip.className = "ccm-curtain-grip"; curtainGrip.style.display = "none";
   curtainGrip.innerHTML =
-    '<span class="ccm-cg-top" title="回到文章最上面">⤒</span>' +
+    '<span class="ccm-cg-top" title="回到文章最上面，審稿線歸零（從頭開始審）">⤒</span>' +
     '<span class="ccm-cg-op" title="更透明">－</span>' +
     '<span class="ccm-cg-label" title="拖曳＝移動審稿線；數字＝審稿進度（拉到最後一段＝100%）">⬍ 審到這</span>' +
     '<span class="ccm-cg-op" title="更濃">＋</span>' +
@@ -1369,17 +1370,32 @@ function buildCurtain() {
   ops[0].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity - 0.06); };
   ops[1].onclick = (e) => { e.stopPropagation(); setCurtainOpacity(curtainOpacity + 0.06); };
   curtainGrip.querySelector(".ccm-cg-x").onclick = (e) => { e.stopPropagation(); setCurtain(false); };
-  curtainGrip.querySelector(".ccm-cg-top").onclick = (e) => { e.stopPropagation(); scrollArticleTop(); };
+  curtainGrip.querySelector(".ccm-cg-top").onclick = (e) => { e.stopPropagation(); curtainToTop(); };
   document.body.appendChild(curtainGrip);
 }
-// 回到文章最上面：只捲主欄，不動審稿線（進度照舊）。Roam 換頁常沿用上一頁的捲動位置，
-// 從儲藏室清單底部點進新稿就會落在最下面，這顆鈕免得一路往上捲。
+// 回到文章最上面。Roam 主欄真正在捲動的是 .rm-article-wrapper（site.css：height:100%;overflow-y:scroll），
+// .roam-article 本身不捲、.roam-body 是 overflow:hidden 所以 window.scrollTo 也沒用（v4 就是押錯這層才沒反應）。
+// 做法不押注哪一層：從 .roam-article 往上，每一層有捲動量的祖先都歸零。回傳歸零了幾層（測試用）。
 function scrollArticleTop() {
-  const sc = curtainScroller || curtainScrollerEl();
-  const smooth = { top: 0, left: 0, behavior: "smooth" };
-  try { if (curtainIsDoc(sc)) window.scrollTo(smooth); else sc.scrollTo(smooth); }
-  catch (e) { if (curtainIsDoc(sc)) window.scrollTo(0, 0); else sc.scrollTop = 0; }
-  if (!curtainIsDoc(sc)) { try { window.scrollTo(0, 0); } catch (e) {} }   // 兜底：真正的捲動容器若是 window 也歸零
+  const start = document.querySelector(".roam-article") || document.querySelector(".rm-article-wrapper") || document.body;
+  let n = 0;
+  for (let e = start; e; e = e.parentElement) { if (e.scrollTop > 0) { e.scrollTop = 0; n++; } }
+  const se = document.scrollingElement; if (se && se.scrollTop > 0) { se.scrollTop = 0; n++; }
+  try { window.scrollTo(0, 0); } catch (e) {}
+  return n;
+}
+// ⤒：捲到頂＋審稿線歸零到第一段頂端（0%），這頁記成「從頭開始」。Roam 換頁常沿用上一頁的捲動位置，
+// 從儲藏室清單底部點進新稿就落在最下面、簾子還停在舊位置，這顆鈕一次把兩件事歸位。
+function curtainToTop() {
+  scrollArticleTop();
+  curtainRangeCache = null;
+  const rng = curtainRange();
+  curtainAnchor = rng.start;
+  positionCurtain();
+  try { api.settings.set("curtainAnchor", Math.round(curtainAnchor)); } catch (e) {}
+  const pg = currentOpenUid();
+  if (pg) { curtainByPage[pg] = CURTAIN_TOP; saveCurtainPages(); }
+  toast("⤒ 回到最上面，審稿線歸零 0%");
 }
 function setCurtainOpacity(v) {
   curtainOpacity = Math.max(0.08, Math.min(0.7, v));
@@ -1435,7 +1451,7 @@ function curtainDragEnd() {
   try { api.settings.set("curtainAnchor", Math.round(curtainAnchor)); } catch (e) {}
   // 把「審到這條線」錨定到某個 block（穩定、跨螢幕/跨電腦），依「本頁」分開記
   const pg = currentOpenUid();
-  if (pg) { const u = curtainAnchorBlockUid(); if (u) { curtainByPage[pg] = u; saveCurtainPages(); } }
+  if (pg) { curtainByPage[pg] = curtainAnchorBlockUid() || CURTAIN_TOP; saveCurtainPages(); }
 }
 // 視窗 Y ↔ 內容座標；找出「審稿線上方最後一個 block」＝上次審到的那段
 function curtainContentY(viewportY) {
@@ -1482,6 +1498,10 @@ function restoreCurtainForPage() {
   if (!curtainOn) return false;
   const pg = currentOpenUid(); if (!pg) return false;
   const u = curtainByPage[pg]; if (!u) return false;
+  if (u === CURTAIN_TOP) {
+    if (!document.querySelector(".rm-block-text, .roam-block")) return false;   // 本頁還沒渲染 → 待重試
+    curtainRangeCache = null; curtainAnchor = curtainRange().start; positionCurtain(); return true;
+  }
   const el = findBlockTextEl(u); if (!el) return false;   // 該段還沒渲染（收合/未捲到）→ 待重試
   curtainAnchor = curtainContentY(el.getBoundingClientRect().bottom);
   positionCurtain();
@@ -1686,13 +1706,13 @@ function onload({ extensionAPI }) {
     { label: "請CC修改：套用排版提案", callback: () => applyReformat() },
     { label: "請CC修改：還原排版前備份", callback: () => restoreReformatBackup() },
     { label: "請CC修改：審稿簾 開/關", callback: () => setCurtain(!curtainOn) },
-    { label: "請CC修改：回到文章最上面", callback: () => scrollArticleTop() },
+    { label: "請CC修改：回到文章最上面", callback: () => (curtainOn ? curtainToTop() : scrollArticleTop()) },
     { label: "請CC修改：重整標記", callback: () => refreshDecorations(true) },
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v4 loaded — 審稿簾握把多了 ⤒ 回到文章最上面");
-  setTimeout(() => toast("請CC修改 v4 已載入：審稿簾握把多了 ⤒ 回到最上面"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v5 loaded — ⤒ 改為捲到頂＋審稿線歸零（捲 .rm-article-wrapper）");
+  setTimeout(() => toast("請CC修改 v5 已載入：⤒ 捲到頂＋審稿線歸零"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
