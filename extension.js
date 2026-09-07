@@ -1117,6 +1117,7 @@ function verifyReformatPlan(ctx) {
   const covered = new Set();
   const addSubtree = (u) => {
     if (atomIds.has(u)) return;                 // atom 與其子孫不屬於正文
+    if (blanks.has(u)) return;                  // 純空白 block 會在 Phase 3 被刪，不算覆蓋（否則與 expected 對不起來）
     covered.add(u);
     for (const c of body.get(u)?.childUids || []) addSubtree(c);
   };
@@ -2382,8 +2383,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v10.2 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
-  setTimeout(() => toast("請CC修改 v10.2 已載入：面板會標明改片段還是整段＋版次表自動更新＋可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v10.3 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
+  setTimeout(() => toast("請CC修改 v10.3 已載入：面板會標明改片段還是整段＋版次表自動更新＋可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
