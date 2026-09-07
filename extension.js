@@ -1399,6 +1399,52 @@ const roamPlanApi = {
   del: (uid) => window.roamAlphaAPI.deleteBlock({ block: { uid } }),
 };
 
+
+// ── 改稿版次表（🗂）：套用成功後由 extension 自己補一行 ─────────────────────
+// 2026-09-07 Bear 要求。原本 PROTOCOL §十 規定由 CC 手動維護，但同一天 CC 就漏了兩次
+// （建提案時該記「待套用」、套用後該改「已套用」），兩次都要 Bear 提醒才補。
+// 規則靠紀律就會漏；套用成功那一刻 extension 就在現場，知道搬了幾處、稽核過沒過、
+// 而且時間是真的 → 這件事該是機器的副作用，不是人的待辦。
+const VERSION_LOG_PREFIX = "🗂 改稿版次";
+function findVersionLogs(pageUid) {
+  try {
+    return (window.roamAlphaAPI.q(
+      `[:find ?u ?s :where [?b :block/page ?pg] [?pg :block/uid "${pageUid}"] [?b :block/uid ?u] [?b :block/string ?s]]`) || [])
+      .filter(([, str]) => (str || "").trim().startsWith(VERSION_LOG_PREFIX))
+      .map(([uid, str]) => ({ uid, str }));
+  } catch (e) { console.warn("[請CC修改] findVersionLogs failed", e); return []; }
+}
+async function bumpVersionLog(pageUid, stats, audit, api) {
+  const logs = findVersionLogs(pageUid);
+  if (logs.length > 1) { console.warn("[請CC修改] 版次表不只一個，未自動更新", logs); return "⚠️ 版次表有多個，沒自動更新"; }
+  const stamp = reformatStamp();
+  const parts = [];
+  if (stats.move)   parts.push(`搬移 ${stats.move}`);
+  if (stats.heads)  parts.push(`新標題 ${stats.heads}`);
+  if (stats.split)  parts.push(`切分 ${stats.split}→+${stats.splitNew}`);
+  if (stats.merge)  parts.push(`合併 ${stats.merge}`);
+  if (stats.bold)   parts.push(`加粗 ${stats.bold}`);
+  if (stats.blanks) parts.push(`清空行 ${stats.blanks}`);
+  const c = audit.check || {};
+  const check = `稽核 內容${c.text ? "✅" : "❌"} 引用${c.refs ? "✅" : "❌"} 排除區${c.atoms ? "✅" : "❌"}`;
+  const detail = `整篇重排版（${parts.join("／") || "無實質變更"}）；${check} → ✅ 已套用`;
+  try {
+    if (!logs.length) {                                  // 沒有就在頁面最上面建一個（🗂 開頭＝自動被排除）
+      const root = api.newUid();
+      await api.create({ parent: pageUid, order: 0, uid: root, string: `${VERSION_LOG_PREFIX}｜第 1 輪 · ${stamp}（整篇重排版）` });
+      await api.create({ parent: root, order: 0, uid: api.newUid(), string: `第 1 輪｜${stamp}｜${detail}` });
+      return "已新建版次表（在頁面最上面，記得搬到該稿底下）";
+    }
+    const log = logs[0];
+    const m = /(v[0-9.]+)\s*·\s*第\s*(\d+)\s*輪/.exec(log.str);
+    const ver = m ? m[1] : "v?";
+    const n = m ? parseInt(m[2], 10) + 1 : 1;
+    await api.update({ uid: log.uid, string: `${VERSION_LOG_PREFIX}｜${ver} · 第 ${n} 輪 · ${stamp}（整篇重排版）` });
+    await api.create({ parent: log.uid, order: 0, uid: api.newUid(), string: `${ver} · 第 ${n} 輪｜${stamp}｜${detail}` });
+    return `版次表 → ${ver} · 第 ${n} 輪`;
+  } catch (e) { console.warn("[請CC修改] bumpVersionLog failed", e); return "⚠️ 版次表更新失敗（見 Console）"; }
+}
+
 // ── 日期／小工具 ──
 function reformatStamp() { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 function reformatDate() { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }
@@ -1515,7 +1561,9 @@ async function applyReformat() {
   let audit = null;
   try {
     audit = await applyReformatPlan(ctx, roamPlanApi, (m) => console.log("[請CC修改][v10] " + m));
-    if (audit.ok) toast(`已套用重排版（搬 ${audit.moved}／新建 ${audit.created}／改字 ${audit.updated}／刪 ${audit.deleted}；稽核：內容${audit.check.text ? "✅" : "❌"} 引用${audit.check.refs ? "✅" : "❌"} 排除區${audit.check.atoms ? "✅" : "❌"}）`);
+    let verMsg = "";
+    if (audit.ok) verMsg = await bumpVersionLog(pg.uid, vr.stats, audit, roamPlanApi);   // 版次表：機器自己記，不靠 CC
+    if (audit.ok) toast(`已套用重排版（搬 ${audit.moved}／新建 ${audit.created}／改字 ${audit.updated}／刪 ${audit.deleted}；稽核：內容${audit.check.text ? "✅" : "❌"} 引用${audit.check.refs ? "✅" : "❌"} 排除區${audit.check.atoms ? "✅" : "❌"}）　${verMsg}`);
     else toast(`套用未完成（${audit.errors.length} 條問題，見 Console）。正文完整、沒有刪除，可再按一次接著跑`);
   } catch (e) {
     console.warn("[請CC修改] applyReformatPlan failed", e, audit);
@@ -2303,8 +2351,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v10 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
-  setTimeout(() => toast("請CC修改 v10 已載入：可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v10.1 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
+  setTimeout(() => toast("請CC修改 v10.1 已載入：版次表自動更新＋可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
