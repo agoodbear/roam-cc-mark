@@ -795,7 +795,7 @@ function isReformatExcludedRoot(str) {
     /#cc排版提案/.test(s) || /#\[\[cc排版提案\]\]/.test(s) ||    // #cc排版提案 root
     /^✅\s*已發佈/.test(s);                                     // ✅ 已發佈 封存行
 }
-// 頁面 top-level 正文樹 → 深度優先攤平成字串陣列（過濾特殊 root）。驗證用；順序＝:block/order
+// 頁面 top-level 正文樹 → 深度優先攤平成字串陣列（過濾特殊 root）。v9 驗證器用；v10 保留給稽核
 function gatherBodyBlocks(pageUid) {
   let tree;
   try { tree = window.roamAlphaAPI.pull("[:block/uid :block/string :block/order {:block/children ...}]", [":block/uid", pageUid]); }
@@ -804,6 +804,62 @@ function gatherBodyBlocks(pageUid) {
   const sortKids = (n) => ((n && n[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
   const walk = (n) => { out.push(n[":block/string"] || ""); for (const k of sortKids(n)) walk(k); };
   for (const t of sortKids(tree)) { if (isReformatExcludedRoot(t[":block/string"])) continue; walk(t); }
+  return out;
+}
+
+// ── v10 ─────────────────────────────────────────────────────────────────
+// atom＝「非正文但混在正文層裡」的 block（任意深度的 🗂／🗄／#cc排版備份）。
+// 2026-09-07：版次表從 top-level 搬進稿底下之後，只看 top-level 的排除規則就不夠了。
+// atom 與其子孫不進 body、提案不准引用、跟著父層走；Phase 1 把明列子層 move 到 last，atom 自然留最前。
+function isReformatAtom(str) {
+  const s = (str || "").trim();
+  return /^🗂/.test(s) || /^🗄/.test(s) || /#cc排版備份/.test(s) || /#\[\[cc排版備份\]\]/.test(s);
+}
+// v10 的正文結構：Map<uid,{string,parentUid,childUids,heading,order}> ＋ atom 集合 ＋ 頁層排除 root
+function gatherBodyStruct(pageUid) {
+  const body = new Map(), atomIds = new Set(), topLevel = [], excludedRoots = [];
+  let tree;
+  try { tree = window.roamAlphaAPI.pull("[:block/uid :block/string :block/order :block/heading {:block/children ...}]", [":block/uid", pageUid]); }
+  catch (e) { console.warn("[請CC修改] gatherBodyStruct pull failed", e); return { body, atomIds, topLevel, excludedRoots }; }
+  const sortKids = (n) => ((n && n[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
+  const markAtom = (n) => { atomIds.add(n[":block/uid"]); for (const k of sortKids(n)) markAtom(k); };
+  const walk = (n, parentUid) => {
+    for (const k of sortKids(n)) {
+      const s = k[":block/string"] || "";
+      if (isReformatAtom(s)) { markAtom(k); continue; }
+      body.set(k[":block/uid"], {
+        string: s, parentUid, heading: k[":block/heading"], order: k[":block/order"] || 0,
+        childUids: sortKids(k).filter((c) => !isReformatAtom(c[":block/string"] || "")).map((c) => c[":block/uid"]),
+      });
+      walk(k, k[":block/uid"]);
+    }
+  };
+  for (const t of sortKids(tree)) {
+    const s = t[":block/string"] || "";
+    if (isReformatExcludedRoot(s)) { excludedRoots.push(t[":block/uid"]); if (isReformatAtom(s)) markAtom(t); continue; }
+    topLevel.push(t[":block/uid"]);
+    body.set(t[":block/uid"], {
+      string: s, parentUid: pageUid, heading: t[":block/heading"], order: t[":block/order"] || 0,
+      childUids: sortKids(t).filter((c) => !isReformatAtom(c[":block/string"] || "")).map((c) => c[":block/uid"]),
+    });
+    walk(t, t[":block/uid"]);
+  }
+  return { body, atomIds, topLevel, excludedRoots };
+}
+// R＝本頁被其他 block 引用的集合（排除提案子樹自己發出的 ((uid))）。這些是石頭：只准整段搬。
+function inboundRefs(pageUid, proposalRootUid) {
+  const out = new Set();
+  try {
+    const rows = window.roamAlphaAPI.q(
+      `[:find ?tgt ?src :where [?t :block/page ?pg] [?pg :block/uid "${pageUid}"] [?t :block/uid ?tgt]
+        [?s :block/refs ?t] [?s :block/uid ?src]]`) || [];
+    const inProposal = new Set();
+    if (proposalRootUid) {
+      const pt = window.roamAlphaAPI.pull("[:block/uid {:block/children ...}]", [":block/uid", proposalRootUid]);
+      (function w(n) { if (!n) return; inProposal.add(n[":block/uid"]); for (const k of (n[":block/children"] || [])) w(k); })(pt);
+    }
+    for (const [tgt, src] of rows) if (!inProposal.has(src)) out.add(tgt);
+  } catch (e) { console.warn("[請CC修改] inboundRefs failed", e); }
   return out;
 }
 // 現有正文 top-level blocks（排除特殊 root）→ [{uid, order}]，套用時整棵搬進備份。與 gatherBodyBlocks 共用過濾
@@ -841,11 +897,42 @@ function queryReformatProposal(pageUid) {
   const summaryNode = find("【變更摘要】"), suggestNode = find("【結構診斷】") || find("【建議】"), resultNode = find("【重排結果】");   // 【建議】＝v8 以前的舊欄名，仍認得
   const flat = [];
   if (resultNode) { const walk = (n) => { flat.push(n[":block/string"] || ""); for (const c of sortKids(n)) walk(c); }; for (const c of sortKids(resultNode)) walk(c); }
+  // ── v10：把【重排結果】讀成「樹」（不是攤平），另外解析三種文字操作宣告 ──
+  const planTree = resultNode
+    ? sortKids(resultNode).map(function conv(n) {
+        return { string: n[":block/string"] || "", uid: n[":block/uid"], children: sortKids(n).map(conv) };
+      })
+    : [];
+  const linesOf = (kw) => {
+    const node = find(kw);
+    return node ? sortKids(node).map((k) => (k[":block/string"] || "").trim()).filter(Boolean) : [];
+  };
+  const REFX = /\(\(([A-Za-z0-9_-]{1,40})\)\)/g;
+  const uidsIn = (line) => { const o = []; let m; REFX.lastIndex = 0; while ((m = REFX.exec(line))) o.push(m[1]); return o; };
+  const splits = linesOf("【切分】").map((l) => {
+    const us = uidsIn(l);
+    if (/依換行/.test(l)) return { uid: us[0], mode: "newline", newUids: us.slice(1), raw: l };
+    const m = /切點：「([\s\S]*?)」\s*‖\s*「([\s\S]*?)」/.exec(l);
+    return { uid: us[0], mode: "anchor", before: m ? m[1] : "", after: m ? m[2] : "", newUids: us.slice(1), raw: l };
+  }).filter((x) => x.uid);
+  const merges = linesOf("【合併】").map((l) => ({
+    uids: uidsIn(l),
+    joiner: /接合：換行/.test(l) ? "\n" : /接合：空格/.test(l) ? " " : "",
+    raw: l,
+  })).filter((x) => x.uids.length >= 2);
+  const bolds = linesOf("【加粗】").map((l) => {
+    const us = uidsIn(l), m = /「([\s\S]*)」\s*$/.exec(l);
+    return { uid: us[0], sentence: m ? m[1] : "", raw: l };
+  }).filter((x) => x.uid && x.sentence);
+  // v9 舊格式偵測：【重排結果】的節點若不是 ((uid))／##標題 就是副本式提案
+  const isV9 = planTree.some((n) => !/^\(\([A-Za-z0-9_-]{1,40}\)\)$/.test((n.string || "").trim()) && !/^#{2,3}\s/.test((n.string || "").trim()));
+
   return {
     rootUid, rootStr: (tree && tree[":block/string"]) || "",
     summaryStr: summaryNode ? (summaryNode[":block/string"] || "") : "",
     suggestStr: suggestNode ? (suggestNode[":block/string"] || "") : "",
     resultUid: resultNode && resultNode[":block/uid"], resultNode, proposalTexts: flat,
+    planTree, splits, merges, bolds, isV9,
   };
 }
 // 查本頁所有 #cc排版備份 root（正常至多一個）→ [{uid, str}]
@@ -864,6 +951,26 @@ function normReformatText(s) {
 }
 // 「## 」或「### 」開頭＝提案新增的標題 block（唯一合法新增）→ 比對前剔除
 function isHeadingBlock(s) { return /^\s*#{2,3}\s/.test(s || ""); }
+
+// ── 標題守衛（2026-09-07 補洞）───────────────────────────────────────────
+// 洞在哪：標題 block 在「逐字比對」與「格式記號守恆」兩道檢查之前就被 filter 掉了，
+// 等於 CC 可以把原稿沒有的任何字塞進 `## `，驗證器完全看不見。實測：
+//   提案多一段「## 她死於心肌梗塞，就是因為那天沒有做導管」→ verifyZeroDrift 回 ok:true。
+// 補法是四條，前三條機器擋，第四條靠人：
+//   1) 數量上限  2) 長度上限  3) 禁記號、禁數字（醫學數字絕不走這條通道）
+//   4) 卡片把每個新標題全文列出來 —— 捏造的「短標題」機器擋不住，只能靠 Bear 眼睛看。
+const HEAD_MAX_LEN = 30;   // 單一標題字數上限（拿真實文章校準：「這個 case：SLE 合併 APS，TnI 顯著升高」27 字要能過）
+const HEAD_MAX_N = 15;     // 全篇新標題數量上限
+function checkHeadings(headTexts) {
+  const errors = [];
+  if (headTexts.length > HEAD_MAX_N) errors.push(`新標題 ${headTexts.length} 個，超過上限 ${HEAD_MAX_N}`);
+  for (const t of headTexts) {
+    if ([...t].length > HEAD_MAX_LEN) errors.push(`標題過長（${[...t].length} 字，上限 ${HEAD_MAX_LEN}）：${t}`);
+    if (/\[\[|\(\(|\{\{|!\[/.test(t)) errors.push(`標題內不得出現 [[ (( {{ ![ ：${t}`);
+    if (/[0-9０-９]/.test(t)) errors.push(`標題內不得出現數字：${t}`);
+  }
+  return { ok: errors.length === 0, errors };
+}
 // 守恆計數：格式記號兩側次數必一致（防「文字沒改但把 highlight／ref／圖片弄丟」）
 function countReformatTokens(raw) {
   const c = (re) => (raw.match(re) || []).length;
@@ -878,6 +985,10 @@ function countReformatTokens(raw) {
 function verifyZeroDrift(bodyTexts, proposalTexts) {
   const bodyBlocks = bodyTexts || [];
   const propBlocks = (proposalTexts || []).filter((s) => !isHeadingBlock(s));   // 剔除提案側 ##/### 標題
+  const headTexts = (proposalTexts || []).filter(isHeadingBlock)
+    .map((s) => s.replace(/^\s*#{2,3}\s+/, "").trim());                          // 被剔除的那些＝唯一能塞新字的通道
+  const heads = checkHeadings(headTexts);
+  heads.texts = headTexts;
   const bodyNorm = bodyBlocks.map(normReformatText).filter((x) => x);
   const propNorm = propBlocks.map(normReformatText).filter((x) => x);
   const A = bodyNorm.join(""), B = propNorm.join("");   // 逐字串接（禁段落搬移 → 串接比對成立）
@@ -890,8 +1001,403 @@ function verifyZeroDrift(bodyTexts, proposalTexts) {
   const bc = countReformatTokens(bodyBlocks.join("\n")), pc = countReformatTokens(propBlocks.join("\n"));
   const counts = { ok: true, body: bc, proposal: pc, diff: [] };
   for (const k of Object.keys(bc)) if (bc[k] !== pc[k]) { counts.ok = false; counts.diff.push({ kind: k, body: bc[k], proposal: pc[k] }); }
-  return { ok: textOk && counts.ok, textOk, firstDiff, counts };
+  return { ok: textOk && counts.ok && heads.ok, textOk, firstDiff, counts, heads };
 }
+
+// ── v10 安全核心：verifyReformatPlan（自 scratchpad/plan-verify.mjs 移植，26/26 對抗測試通過）──
+// v10 ── verifyReformatPlan：把 CC 的「操作計畫」驗到能安全套用為止。
+// 純函式、無 Roam 依賴 → headless 對抗式測試。
+//
+// 與 v9 最大的不同：提案樹裡**沒有 Bear 的字**，只有 ((uid)) 與 ## 標題。
+// 所以「不改字」不是驗出來的，是建構出來的；這裡驗的是「結構有沒有漏、有沒有多、有沒有動到不該動的」。
+
+
+const PLAN_REF_ONLY = /^\(\(([A-Za-z0-9_-]{1,40})\)\)$/;
+const PLAN_HEAD_RE  = /^(#{2,3})\s+(.*)$/;
+
+const PLAN_HEAD_MAX_LEN = 30;   // 拿真實文章校準（「這個 case：SLE 合併 APS，TnI 顯著升高」27 字要能過）
+const PLAN_HEAD_MAX_N   = 15;
+const PLAN_BOLD_MAX_N   = 5;
+const PLAN_HEAD_MARKUP = /\[\[|\(\(|\{\{|!\[/;
+const PLAN_HEAD_DIGIT  = /[0-9０-９]/;
+const PLAN_SENT_END    = /[。！？；：!?;:.…」』）\)]/;   // 切點前最後一個非空白字必須是句末標點
+
+/**
+ * @param {object} ctx
+ *   body    Map<uid, {string, parentUid, childUids:[], heading?}>   正文（已排除 atom 與頁層排除 root）
+ *   atomIds Set<uid>            任意深度的 🗂/🗄 atom 與其子孫
+ *   refd    Set<uid>            R：被引用集合（已排除提案子樹發出的引用）
+ *   tree    [{string, children}] 【重排結果】的直接子層
+ *   splits  [{uid, mode:'anchor'|'newline', newUids:[], before?, after?}]
+ *   merges  [{uids:[survivor,...away], joiner:''|'\n'|' '}]
+ *   bolds   [{uid, sentence}]
+ */
+function verifyReformatPlan(ctx) {
+  const { body, atomIds = new Set(), refd = new Set(), tree = [],
+          splits = [], merges = [], bolds = [] } = ctx;
+  const errors = [];
+  const E = (code, msg, extra = {}) => errors.push({ code, msg, ...extra });
+  const brief = (u) => `${u}「${(body.get(u)?.string || "").replace(/\n/g, "⏎").slice(0, 12)}」`;
+
+  // ── 先攤平提案樹，順便做 V1 / V2 ────────────────────────────────────
+  const listed = [];          // [{uid, isLeaf, depth}]
+  const heads  = [];
+  (function walk(nodes, depth) {
+    for (const n of nodes) {
+      const s = (n.string || "").trim();
+      const mRef = PLAN_REF_ONLY.exec(s), mHead = PLAN_HEAD_RE.exec(s);
+      if (mRef)       listed.push({ uid: mRef[1], isLeaf: !(n.children || []).length, depth });
+      else if (mHead) heads.push({ level: mHead[1].length, text: mHead[2].trim() });
+      else            E("V1_FOREIGN", `提案節點不是 ((uid)) 也不是 ##/### 標題：「${s.slice(0, 30)}」`);
+      walk(n.children || [], depth + 1);
+    }
+  })(tree, 0);
+
+  if (heads.length > PLAN_HEAD_MAX_N) E("V2_HEAD_MANY", `新標題 ${heads.length} 個，上限 ${PLAN_HEAD_MAX_N}`);
+  for (const h of heads) {
+    if ([...h.text].length > PLAN_HEAD_MAX_LEN) E("V2_HEAD_LONG", `標題過長（${[...h.text].length} 字）：${h.text}`);
+    if (PLAN_HEAD_MARKUP.test(h.text))          E("V2_HEAD_MARKUP", `標題內不得出現 [[ (( {{ ![：${h.text}`);
+    if (PLAN_HEAD_DIGIT.test(h.text))           E("V2_HEAD_DIGIT", `標題內不得出現數字：${h.text}`);
+  }
+
+  // ── 三種文字操作先解析出集合（V5 要用）───────────────────────────
+  const newSplitUids = new Set();
+  for (const sp of splits) for (const u of sp.newUids || []) newSplitUids.add(u);
+  const mergedAway = new Set();
+  for (const mg of merges) for (const u of (mg.uids || []).slice(1)) mergedAway.add(u);
+
+  // 純空白且無子層 → 隱含刪除（不必宣告）
+  const blanks = new Set();
+  for (const [u, b] of body) if (!normReformatText(b.string) && !(b.childUids || []).length) blanks.add(u);
+
+  // ── V3 每個引用都要指得到；V6 不准引用 atom ────────────────────────
+  for (const it of listed) {
+    if (atomIds.has(it.uid)) { E("V6_ATOM", `不得引用排除區（🗂/🗄）的 block：${it.uid}`, { uid: it.uid }); continue; }
+    if (!body.has(it.uid) && !newSplitUids.has(it.uid))
+      E("V3_UNKNOWN", `提案引用了不存在於正文的 uid：${it.uid}`, { uid: it.uid });
+  }
+
+  // ── V4 明列不得重複 ────────────────────────────────────────────────
+  const seen = new Map();
+  for (const it of listed) seen.set(it.uid, (seen.get(it.uid) || 0) + 1);
+  for (const [u, n] of seen) if (n > 1) E("V4_DUP", `同一段在提案裡出現 ${n} 次：${brief(u)}`, { uid: u });
+
+  // ── V5 覆蓋：明列 ∪ 葉節點隱含子樹  ==  應涵蓋集合 ────────────────
+  const listedSet = new Set(listed.map((i) => i.uid));
+  const covered = new Set();
+  const addSubtree = (u) => {
+    if (atomIds.has(u)) return;                 // atom 與其子孫不屬於正文
+    covered.add(u);
+    for (const c of body.get(u)?.childUids || []) addSubtree(c);
+  };
+  for (const it of listed) {
+    if (!body.has(it.uid)) { covered.add(it.uid); continue; }   // 切分產生的新 uid
+    if (it.isLeaf) addSubtree(it.uid);
+    else {
+      covered.add(it.uid);
+      // 內部節點：它的子層由提案明列 → 這裡不展開；但若某個現有子層既沒被明列、
+      //           也不在別處被明列，V5 的差集會抓到（就是孤兒）
+    }
+  }
+  // 葉節點隱含展開時不得吃掉別處明列的 uid（V4 的第二半）
+  for (const it of listed) {
+    if (!body.has(it.uid) || !it.isLeaf) continue;
+    for (const c of body.get(it.uid).childUids || [])
+      (function chk(x) {
+        if (listedSet.has(x)) E("V4_OVERLAP", `${brief(it.uid)} 以葉節點整棵照搬，但它的子孫 ${x} 又被單獨明列`, { uid: x });
+        for (const g of body.get(x)?.childUids || []) chk(g);
+      })(c);
+  }
+
+  const expected = new Set();
+  for (const u of body.keys()) {
+    if (atomIds.has(u) || mergedAway.has(u) || blanks.has(u)) continue;
+    expected.add(u);
+  }
+  for (const u of newSplitUids) expected.add(u);
+
+  for (const u of expected) if (!covered.has(u))
+    E("V5_ORPHAN", `這段沒被安置（孤兒）：${brief(u)}，現在掛在 ${body.get(u)?.parentUid || "?"}`, { uid: u });
+  for (const u of covered) if (!expected.has(u))
+    E("V5_EXTRA", `提案多出一段：${u}`, { uid: u });
+
+  // ── V7 被引用的段落完全不可變 ─────────────────────────────────────
+  const mutated = new Set([...newSplitUids]);
+  for (const sp of splits) mutated.add(sp.uid);
+  for (const mg of merges) for (const u of mg.uids || []) mutated.add(u);
+  for (const b of bolds) mutated.add(b.uid);
+  for (const u of blanks) mutated.add(u);
+  for (const u of refd) if (mutated.has(u))
+    E("V7_REFD", `被其他 block 引用的段落只准整段搬，不可切/併/加粗/刪：${brief(u)}`, { uid: u });
+
+  // ── V8 切分 ────────────────────────────────────────────────────────
+  for (const sp of splits) {
+    const b = body.get(sp.uid);
+    if (!b) { E("V8_NO_BLOCK", `切分指向不存在的 block ${sp.uid}`); continue; }
+    let pieces = null;
+    if (sp.mode === "newline") {
+      pieces = b.string.split("\n");
+      if (pieces.length !== (sp.newUids || []).length + 1)
+        E("V8_COUNT", `依換行切分：${sp.uid} 有 ${pieces.length} 段，但只宣告了 ${(sp.newUids || []).length} 個新 uid`);
+    } else {
+      const re = new RegExp(planEsc(sp.before) + "\\s*" + planEsc(sp.after));
+      const hits = [...b.string.matchAll(new RegExp(re, "g"))];
+      if (hits.length !== 1) { E("V8_ANCHOR", `切點錨點在 ${sp.uid} 命中 ${hits.length} 次（須恰好 1 次），請加長錨點`); continue; }
+      const cut = hits[0].index + sp.before.length;
+      // 右半片從 after 開頭算起，不是從整個 match 之後（match 把 after 也含進去了）
+      const rightStart = hits[0].index + hits[0][0].length - sp.after.length;
+      const left = b.string.slice(0, cut);
+      const lastCh = left.replace(/\s+$/, "").slice(-1);
+      const gapHasNL = /\n/.test(b.string.slice(cut, rightStart));
+      if (!PLAN_SENT_END.test(lastCh) && !gapHasNL)
+        E("V8_NOT_PUNCT", `切點不在句末標點也不在換行處（前一個字是「${lastCh}」）：${sp.uid}`);
+      pieces = [left, b.string.slice(rightStart)];
+      if ((sp.newUids || []).length !== 1)
+        E("V8_COUNT", `錨點切分應宣告 1 個新 uid，實得 ${(sp.newUids || []).length}`);
+    }
+    if (pieces) {
+      pieces.forEach((p, k) => {
+        if (!normReformatText(p)) E("V8_EMPTY", `${sp.uid} 切出空片段（第 ${k + 1} 片）`);
+        if (planCount(p, /\*\*/g) % 2) E("V8_UNPAIRED", `${sp.uid} 第 ${k + 1} 片的 ** 沒有成對`);
+        if (planCount(p, /\^\^/g) % 2) E("V8_UNPAIRED", `${sp.uid} 第 ${k + 1} 片的 ^^ 沒有成對`);
+      });
+      const tot = pieces.map(planTok).reduce(planSumTok, planTok(""));
+      const src = planTok(b.string);
+      for (const k of Object.keys(src)) if (src[k] !== tot[k])
+        E("V8_TOKEN", `${sp.uid} 切分後 ${k} 數量從 ${src[k]} 變成 ${tot[k]}（切斷了語法）`);
+    }
+    for (const nu of sp.newUids || []) {
+      if (body.has(nu)) E("V8_UID_TAKEN", `切分要用的新 uid ${nu} 已經存在`);
+      if ((seen.get(nu) || 0) !== 1) E("V8_UID_UNPLACED", `切分產生的 ${nu} 在提案樹裡出現 ${seen.get(nu) || 0} 次（須恰好 1 次）`);
+    }
+  }
+
+  // ── V9 合併 ────────────────────────────────────────────────────────
+  for (const mg of merges) {
+    const us = mg.uids || [];
+    if (us.length < 2) { E("V9_TOO_FEW", `合併至少要兩段`); continue; }
+    for (const u of us) if (!body.has(u)) E("V9_NO_BLOCK", `合併指向不存在的 block ${u}`);
+    const [sv, ...away] = us;
+    if (!listedSet.has(sv)) E("V9_SURVIVOR_UNPLACED", `合併存活者 ${brief(sv)} 沒有出現在提案樹裡`);
+    for (const u of away) {
+      if (listedSet.has(u)) E("V9_AWAY_LISTED", `被合併掉的 ${brief(u)} 不該出現在提案樹裡`);
+      for (const c of body.get(u)?.childUids || [])
+        if (!listedSet.has(c) && !planCoveredElsewhere(c, listedSet, body))
+          E("V9_AWAY_CHILD", `被合併掉的 ${brief(u)} 還有子層 ${brief(c)} 沒有被安置`);
+    }
+    if (!["", "\n", " "].includes(mg.joiner ?? "")) E("V9_JOINER", `接合字元只能是 無／換行／空格`);
+  }
+
+  // ── V10 加粗 ───────────────────────────────────────────────────────
+  if (bolds.length > PLAN_BOLD_MAX_N) E("V10_BOLD_MANY", `加粗 ${bolds.length} 處，上限 ${PLAN_BOLD_MAX_N}`);
+  for (const bd of bolds) {
+    const b = body.get(bd.uid);
+    if (!b) { E("V10_NO_BLOCK", `加粗指向不存在的 block ${bd.uid}`); continue; }
+    const n = b.string.split(bd.sentence).length - 1;
+    if (n !== 1) E("V10_NOT_UNIQUE", `加粗句在原文出現 ${n} 次（須恰好 1 次）：${bd.sentence.slice(0, 18)}`);
+    if (/\*\*/.test(bd.sentence)) E("V10_NESTED", `加粗句本身已含 **：${bd.sentence.slice(0, 18)}`);
+  }
+
+  // ── V11 每個 uid 最多一種文字操作、一次 ────────────────────────────
+  const opCount = new Map();
+  const bump = (u) => opCount.set(u, (opCount.get(u) || 0) + 1);
+  for (const sp of splits) bump(sp.uid);
+  for (const mg of merges) for (const u of mg.uids || []) bump(u);
+  for (const bd of bolds) bump(bd.uid);
+  for (const [u, n] of opCount) if (n > 1)
+    E("V11_MULTI_OP", `${brief(u)} 同時被 ${n} 種文字操作動到（切完再併這類複合操作不接）`, { uid: u });
+
+  const stats = {
+    move: listed.filter((i) => body.has(i.uid)).length,
+    leafWhole: listed.filter((i) => i.isLeaf && body.has(i.uid)).length,
+    heads: heads.length, headTexts: heads.map((h) => h.text),
+    split: splits.length, splitNew: newSplitUids.size,
+    merge: merges.length, mergedAway: mergedAway.size,
+    bold: bolds.length, blanks: blanks.size, refd: refd.size,
+    bodyTotal: body.size,
+  };
+  return { ok: errors.length === 0, errors, stats };
+}
+
+// ── 小工具 ──
+const planEsc = (s) => (s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const planCount = (s, re) => ((s || "").match(re) || []).length;
+function planTok(raw) {
+  const c = (re) => planCount(raw, re);
+  return { link: c(/\[\[[^\[\]]*\]\]/g), blockref: c(/\(\([^()]*\)\)/g),
+           highlight: c(/\^\^[\s\S]*?\^\^/g), render: c(/\{\{[^{}]*\}\}/g),
+           image: c(/!\[[^\]]*\]\([^()]*\)/g) };
+}
+const planSumTok = (a, b) => { const o = {}; for (const k of Object.keys(a)) o[k] = a[k] + b[k]; return o; };
+function planCoveredElsewhere(uid, listedSet, body) {
+  // 被某個「葉節點整棵照搬」蓋到也算安置好了
+  for (const u of listedSet) {
+    if (!body.has(u)) continue;
+    let found = false;
+    (function w(x) { for (const c of body.get(x)?.childUids || []) { if (c === uid) found = true; w(c); } })(u);
+    if (found) return true;
+  }
+  return false;
+}
+
+
+// ── v10：applyReformatPlan（自 scratchpad/plan-apply.mjs 移植；端到端＋中斷重跑實測通過）──
+const APLAN_REF = /^\(\(([A-Za-z0-9_-]{1,40})\)\)$/;
+const APLAN_HEAD = /^(#{2,3})\s+(.*)$/;
+
+async function applyReformatPlan(ctx, api, log = () => {}) {
+  const { body, atomIds = new Set(), refd = new Set(), tree = [], pageUid,
+          splits = [], merges = [], bolds = [], excludedRoots = [], proposalRootUid = null } = ctx;
+  const audit = { phase: null, created: 0, moved: 0, updated: 0, deleted: 0, errors: [] };
+  const fail = (m) => { audit.errors.push(m); log("❌ " + m); };
+
+  // ── Phase 0：切分（先建新 block，內容就位；位置留給 Phase 1）──────────
+  audit.phase = 0;
+  const splitPieces = new Map();                      // uid -> [片0, 片1, …]（原始字串，不是 norm）
+  for (const sp of splits) {
+    const cur = await api.pull(sp.uid);
+    if (!cur) { fail(`切分來源不存在 ${sp.uid}`); continue; }
+    const orig = body.get(sp.uid).string;
+    let pieces;
+    if (sp.mode === "newline") pieces = orig.split("\n");
+    else {
+      const re = new RegExp(planEsc(sp.before) + "\\s*" + planEsc(sp.after));
+      const m = re.exec(orig);
+      const cut = m.index + sp.before.length;
+      const rightStart = m.index + m[0].length - sp.after.length;
+      pieces = [orig.slice(0, cut), orig.slice(rightStart)];
+    }
+    splitPieces.set(sp.uid, pieces);
+    if (cur.string === pieces[0]) { log(`↩︎ 切分 ${sp.uid} 已完成，跳過（重跑）`); continue; }
+    if (cur.string !== orig) { fail(`切分守衛失敗：${sp.uid} 現況既不是前狀態也不是後狀態（有人改過）`); continue; }
+    for (let k = 1; k < pieces.length; k++) {
+      await api.create({ parent: pageUid, order: "last", uid: sp.newUids[k - 1], string: pieces[k] });
+      audit.created++;
+    }
+    await api.update({ uid: sp.uid, string: pieces[0] });
+    audit.updated++;
+  }
+
+  // ── Phase 1：搬移（冪等；每個 parent 依目標順序全串 move 到 last）──────
+  audit.phase = 1;
+  const headingCache = new Map();                     // `${parent} ${text}` -> uid
+  async function layout(parentUid, nodes) {
+    for (const n of nodes) {
+      const s = (n.string || "").trim();
+      const mRef = APLAN_REF.exec(s), mHead = APLAN_HEAD.exec(s);
+      if (mHead) {
+        const level = mHead[1].length, text = mHead[2].trim();
+        const key = `${parentUid} ${text}`;
+        let uid = headingCache.get(key);
+        if (!uid) {                                    // 重跑守衛：這個 parent 底下已經有同字同級、且不屬於正文的 block ⇒ 沿用
+          const p = await api.pull(parentUid);
+          for (const c of p?.childUids || []) {
+            const cb = await api.pull(c);
+            if (cb && cb.string === text && cb.heading === level && !body.has(c)) { uid = c; break; }
+          }
+        }
+        if (uid) { await api.move({ parent: parentUid, order: "last", uid }); audit.moved++; }
+        else {
+          uid = api.newUid();
+          await api.create({ parent: parentUid, order: "last", uid, string: text, heading: level });
+          audit.created++;
+        }
+        headingCache.set(key, uid);
+        if ((n.children || []).length) await layout(uid, n.children);
+      } else if (mRef) {
+        await api.move({ parent: parentUid, order: "last", uid: mRef[1] });
+        audit.moved++;
+        if ((n.children || []).length) await layout(mRef[1], n.children);
+      }
+    }
+  }
+  await layout(pageUid, tree);
+  // 頁層排除 root（🗂 版次表在頁層時／🗄 備份／✅ 已發佈）依原相對順序收尾
+  for (const u of excludedRoots) { await api.move({ parent: pageUid, order: "last", uid: u }); audit.moved++; }
+
+  // ── Phase 2：會動字串的操作（每條帶守衛）───────────────────────────
+  audit.phase = 2;
+  for (const mg of merges) {
+    const [sv, ...away] = mg.uids;
+    const cur = await api.pull(sv);
+    const want = mg.uids.map((u) => body.get(u).string).join(mg.joiner ?? "");
+    if (cur?.string === want) { log(`↩︎ 合併 ${sv} 已完成，跳過`); continue; }
+    if (cur?.string !== body.get(sv).string) { fail(`合併守衛失敗：${sv} 現況不是前狀態`); continue; }
+    await api.update({ uid: sv, string: want }); audit.updated++;
+  }
+  for (const bd of bolds) {
+    const cur = await api.pull(bd.uid);
+    const want = body.get(bd.uid).string.replace(bd.sentence, "**" + bd.sentence + "**");
+    if (cur?.string === want) { log(`↩︎ 加粗 ${bd.uid} 已完成，跳過`); continue; }
+    if (cur?.string !== body.get(bd.uid).string) { fail(`加粗守衛失敗：${bd.uid} 現況不是前狀態`); continue; }
+    await api.update({ uid: bd.uid, string: want }); audit.updated++;
+  }
+
+  // ── Phase 3：刪除（逐個斷言；提案 root 最後刪，重跑入口留到最後）────
+  audit.phase = 3;
+  if (audit.errors.length) { log("⚠️ 前面有錯，跳過所有刪除（正文完整，可重跑）"); return finish(); }
+  const toDelete = [];
+  for (const mg of merges) for (const u of mg.uids.slice(1)) toDelete.push({ uid: u, why: "合併掉" });
+  for (const [u, b] of body) if (!normReformatText(b.string) && !(b.childUids || []).length) toDelete.push({ uid: u, why: "空白" });
+  for (const d of toDelete) {
+    const cur = await api.pull(d.uid);
+    if (!cur) continue;                                   // 重跑：已刪
+    if ((cur.childUids || []).length) { fail(`拒刪 ${d.uid}（${d.why}）：它還有 ${cur.childUids.length} 個子層`); continue; }
+    if (refd.has(d.uid)) { fail(`拒刪 ${d.uid}（${d.why}）：它被其他 block 引用`); continue; }
+    if (d.why === "空白" && normReformatText(cur.string)) { fail(`拒刪 ${d.uid}：它已經不是空白了`); continue; }
+    await api.del(d.uid); audit.deleted++;
+  }
+  if (proposalRootUid && !audit.errors.length) { await api.del(proposalRootUid); audit.deleted++; }
+
+  // ── Phase 4：回讀稽核（非作者的檢查）───────────────────────────────
+  audit.phase = 4;
+  const expectText = new Map();
+  for (const [u, b] of body) expectText.set(u, b.string);
+  for (const [u, pieces] of splitPieces) {
+    expectText.set(u, pieces[0]);
+    const sp = splits.find((x) => x.uid === u);
+    pieces.slice(1).forEach((p, k) => expectText.set(sp.newUids[k], p));
+  }
+  for (const mg of merges) {
+    expectText.set(mg.uids[0], mg.uids.map((u) => body.get(u).string).join(mg.joiner ?? ""));
+    for (const u of mg.uids.slice(1)) expectText.delete(u);
+  }
+  for (const bd of bolds) expectText.set(bd.uid, body.get(bd.uid).string.replace(bd.sentence, "**" + bd.sentence + "**"));
+  for (const [u, b] of body) if (!normReformatText(b.string) && !(b.childUids || []).length) expectText.delete(u);
+
+  let textBad = 0, refBad = 0, atomBad = 0;
+  for (const [u, want] of expectText) {
+    const cur = await api.pull(u);
+    if (!cur) { fail(`稽核：block 不見了 ${u}`); textBad++; continue; }
+    if (cur.string !== want) { fail(`稽核：字串不符 ${u}`); textBad++; }
+  }
+  for (const u of refd) if (!(await api.pull(u))) { fail(`稽核：被引用的 block 不見了 ${u}`); refBad++; }
+  for (const u of atomIds) {
+    const cur = await api.pull(u);
+    if (!cur) { fail(`稽核：排除區 block 不見了 ${u}`); atomBad++; }
+  }
+  audit.check = { text: textBad === 0, refs: refBad === 0, atoms: atomBad === 0 };
+  return finish();
+
+  function finish() { audit.ok = audit.errors.length === 0; return audit; }
+}
+
+
+// roamAlphaAPI 適配層（測試時可換成本機 HTTP API 的同介面實作）
+const roamPlanApi = {
+  newUid: () => window.roamAlphaAPI.util.generateUID(),
+  pull(uid) {
+    const n = window.roamAlphaAPI.pull("[:block/uid :block/string :block/heading :block/order {:block/children [:block/uid :block/order]}]", [":block/uid", uid]);
+    if (!n) return null;
+    return { string: n[":block/string"] ?? "", heading: n[":block/heading"],
+      childUids: ((n[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0)).map((c) => c[":block/uid"]) };
+  },
+  create: ({ parent, order, uid, string, heading }) =>
+    window.roamAlphaAPI.createBlock({ location: { "parent-uid": parent, order }, block: heading ? { uid, string, heading } : { uid, string } }),
+  move: ({ parent, order, uid }) => window.roamAlphaAPI.moveBlock({ location: { "parent-uid": parent, order }, block: { uid } }),
+  update: ({ uid, string }) => window.roamAlphaAPI.updateBlock({ block: { uid, string } }),
+  del: (uid) => window.roamAlphaAPI.deleteBlock({ block: { uid } }),
+};
 
 // ── 日期／小工具 ──
 function reformatStamp() { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
@@ -912,6 +1418,9 @@ async function copyReformatPrompt() {
 行為法典（第一步務必讀）：本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（§九 整篇重排版；備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）
 對象：Roam page「${pg.title}」（page uid: ${pg.uid}）
 本頁狀態：標記 0／草稿 0（已歸零，可重排）
+${(() => { const r = [...inboundRefs(pg.uid, null)]; const b = gatherBodyStruct(pg.uid).body;
+  const lines = r.filter((u) => b.has(u)).map((u) => `   ((${u}))　${(b.get(u).string || "").replace(/\n/g, " ").slice(0, 24)}`);
+  return lines.length ? `\n⚠️ 石頭清單（這 ${lines.length} 段被其他 block 引用，只准整段搬，不准切/併/加粗/刪）：\n${lines.join("\n")}\n` : "\n（本頁沒有被外部引用的段落）\n"; })()}
 
 情境（決定你該往哪裡看）：
 這篇內容已經完整，但它是**經過多輪「請CC修改」之後的稿**——「接」的草稿是插在「當時標記
@@ -920,8 +1429,9 @@ async function copyReformatPrompt() {
 你的工作是把「版面」修到好讀，並把「順序」的問題**全部診斷出來交給 Bear**。
 
 ⚠️ 鐵律（凌駕一切，違反任一條＝任務失敗）：
-1. 這是「排版」不是「改稿」。Bear 的每一個字逐字保留：禁改字、禁換詞、禁增刪內容、
-   禁修錯字、禁加任何過場句。extension 會逐字機械比對，有位移＝整份提案作廢。
+1. 這是「排版」不是「改稿」。**v10 起你根本不會碰到 Bear 的字**——提案樹裡只放
+   ((uid)) 與新標題，套用時 extension 搬的是 Bear 自己的 block。所以「不改字」不是
+   你要小心的事，是結構上做不到的事。你要小心的是「有沒有漏段、有沒有動到不該動的」。
 2. 你只能做六件事：
    ① 加標題：獨立 block、前綴「## 」（章節）或「### 」（小節）。標題用語取自 Bear
       內文既有詞彙，短、具體、像 Bear 口氣；禁 AI 腔標題（「深入探討」「淺談」「總結」之類）。
@@ -931,17 +1441,23 @@ async function copyReformatPrompt() {
           所屬「## 」之下、該小節正文再縮一層。這樣 Bear 在 Roam 折疊 bullet 就能把全篇
           收成一份骨架。第一個標題之前的開場段落留在頂層、不縮排。
       (b) 連續平行短句縮排為子層（Roam bullet 即清單）。
-   ③ 切分過長段落：只能在原有標點處切，不增刪任何字元。
-   ④ 合併零碎段落：直接串接，不得補字補標點（需要補才通順→寫進【結構診斷】，別動手）。
-   ⑤ 整句加粗：只對「可直接抄進筆記的臨床結論／判斷整句」加 **…**，全篇新增 ≤5 處，
-      每處列進變更摘要。Bear 既有的 **、^^、[[]]、(())、{{}}、圖片連結原樣保留、不增不減。
+   ③ 切分過長段落：寫進【切分】宣告行；切點要落在句末標點或換行處。**含換行的巨型
+      block 現在切得動了**（換行不是字，extension 會丟掉）。
+   ④ 合併零碎段落：寫進【合併】宣告行，不得補字補標點（需要補才通順→寫進【結構診斷】）。
+   ⑤ 整句加粗：寫進【加粗】宣告行，只對「可直接抄進筆記的臨床結論／判斷整句」，全篇 ≤5 處。
    ⑥ 清雜訊：刪純空白 block。
-3. 不碰：「🗂 素材／背景」子樹、「🗄」備份子樹、「✅ 已發佈」行、所有 #標記 block。
+3. 不碰：**任意深度**開頭為 🗂／🗄 的 block（素材、備份、改稿版次表）、「✅ 已發佈」行、所有 #標記 block。
+   這些不進正文、提案樹不准引用它們；它們會自己跟著父層走。
    照片 block（![📷 …](composer.agoodbear.com/…)）逐字保留、跟著原本相鄰段落放。
-4. **你不准自己搬移段落／跨節重排。**兩個原因：敘事順序是 Bear 的作者判斷；而且 extension
-   的零位移驗證是「全篇逐字串接比對」，你一搬移串接就對不上，整份提案會被鎖死、套不了。
-   → 但該搬的**一段都不准漏**，全部寫進【結構診斷】，Bear 自己拖 bullet 落實。
+4. **v10 起你可以搬段落、跨節重排、合併**——這正是這一版做出來的目的。每一處由 extension
+   從樹算出來並列在卡片上，不靠你自報。但**被其他 block 引用的段落是石頭**（清單見下），
+   只准整段搬，不准切、不准併掉、不准加粗、不准刪。
 5. 原稿一個 block 都不准動（不 update、不 delete、不 move）。你的全部產出只放進下述提案樹。
+6. 【重排結果】底下每個節點的字串**只准是兩種之一**，多一個字都會被退件：
+   ・「((uid))」——引用正文的某個 block
+   ・「## 標題」或「### 標題」——新標題，≤30 字、全篇 ≤15 個、**不得含數字**、不得含 [[ (( {{ ![
+   **葉節點（提案裡沒有子節點）＝這段連同它現有的整棵子樹原樣照搬**；有子節點＝它的子層由你明列。
+   所以只有動到結構的地方要展開，沒動的整棵寫一行就好。順序就是樹本身，不要寫 order／index。
 
 步驟：
 1. 讀上面 PROTOCOL.md §九。
@@ -958,8 +1474,13 @@ async function copyReformatPrompt() {
        (c)【接縫】讀起來銜接生硬、像後來塞進去的段落（多輪改稿最常見的病灶）。一處一行：
            斷在哪兩段之間、缺的是什麼（轉折？前提？跟前面重複了？）。只診斷，不准補字。
        (d)【頭尾】開頭第一段、結尾最後一段各評一句：還撐不撐得住？撐不住是缺什麼？
-   - 「【重排結果】」：其直接子層＝重排後的完整正文樹（每個頂層段落一個 block，標題 block
-     用 ##／### 前綴，該節正文依 ②(a) 縮排為該標題的子層）。
+   - 「【切分】」（沒有就不建）每行一條：
+       ((uid))｜切點：「…切點前12字」‖「切點後12字…」→ ((新uid))
+       ((uid))｜依換行 → ((新uid1)) ((新uid2)) …
+   - 「【合併】」（沒有就不建）每行一條：((存活uid)) ＋ ((被併掉uid)) …｜接合：無／換行／空格
+   - 「【加粗】」（沒有就不建）每行一條：((uid)) 「整句」　全篇 ≤5
+   - 「【重排結果】」：其直接子層＝重排後的完整正文樹，**每個節點只能是 ((uid)) 或 ##／### 標題**
+     （見鐵律 6）。章節縮排：正文縮成該節標題的子層。
 4. 回 chat 一份對帳清單：各章標題＋每類變更數；**【結構診斷】的離群段與接縫逐條列在 chat**
    （Bear 要直接讀，不想再翻回 Roam）。
 （更多脈絡：查 Supabase handovers 最近幾筆這篇的紀錄。）`;
@@ -972,42 +1493,33 @@ async function copyReformatPrompt() {
 // ↺ 還原／🧹 清備份保留給更早留下的舊備份用。
 async function applyReformat() {
   const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
-  const marks = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);   // 閘門①：重驗歸零（真標記，排除說明文字裡提到 tag 的 boilerplate）
+  const marks = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);   // 閘門①：歸零
   const draft = countTagOnPage(DRAFT_TAG, pg.uid);
   if (marks || draft) return toast(`還有 ${marks} 標記／${draft} 草稿未清，不能套用`);
-  const prop = queryReformatProposal(pg.uid);                                          // 閘門②：提案存在且有【重排結果】
+  const prop = queryReformatProposal(pg.uid);                                      // 閘門②：提案存在
   if (!prop || !prop.resultUid) return toast("找不到重排提案（或缺【重排結果】）");
-  const bodyTexts = gatherBodyBlocks(pg.uid);
-  const vr = verifyZeroDrift(bodyTexts, prop.proposalTexts);                           // 閘門③：重跑零位移驗證
-  if (!vr.ok) return toast("零位移驗證未過，已鎖住套用（請退回提案）");
-  const resultKids = ((prop.resultNode && prop.resultNode[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
-  if (!resultKids.length) return toast("【重排結果】是空的，未套用");
-  const topBody = topLevelBodyUids(pg.uid);
-  // 收集提案樹裡所有 ##／### 標題 block（含巢狀）→ 促升後轉 Roam heading 屬性、去前綴
-  const headingUpdates = [];
-  (function collect(n) {
-    const hm = (n[":block/string"] || "").match(/^\s*(#{2,3})\s+([\s\S]*)$/);
-    if (hm) headingUpdates.push({ uid: n[":block/uid"], heading: hm[1].length, string: hm[2] });
-    for (const c of (n[":block/children"] || [])) collect(c);
-  })(prop.resultNode);
-  if (topBody.length + resultKids.length > 60) toast("套用中…大頁面請稍候");   // 大頁進度提示
+  if (prop.isV9) return toast("這是 v9 副本式提案（【重排結果】放的是正文副本）。v10 起只收 ((uid)) 計畫，請退回、用新 prompt 重跑");
+  if (!prop.planTree.length) return toast("【重排結果】是空的，未套用");
+
+  const { body, atomIds, excludedRoots } = gatherBodyStruct(pg.uid);               // 閘門③：重跑計畫驗證
+  const refd = inboundRefs(pg.uid, prop.rootUid);
+  const ctx = { body, atomIds, refd, tree: prop.planTree, splits: prop.splits, merges: prop.merges,
+                bolds: prop.bolds, pageUid: pg.uid, excludedRoots, proposalRootUid: prop.rootUid };
+  const vr = verifyReformatPlan(ctx);
+  if (!vr.ok) { console.warn("[請CC修改] plan 驗證未過", vr.errors); return toast(`計畫驗證未過（${vr.errors.length} 條），已鎖住套用`); }
+
+  try { localStorage.setItem("ccm-reformat-snapshot-" + pg.uid,                     // Phase 0：本機快照（不動 Roam 頁面，但留一條回頭路）
+    JSON.stringify(window.roamAlphaAPI.pull("[:block/uid :block/string :block/order :block/heading {:block/children ...}]", [":block/uid", pg.uid]))); } catch (e) {}
+  if (body.size > 60) toast("套用中…大頁面請稍候");
   applying = true;
-  let promoted = 0, removed = 0;
+  let audit = null;
   try {
-    // ① 【重排結果】直接子層促升到頁面 top-level（order 0 遞增＝排版後正文置頂）；整棵子樹跟著 move。舊正文此時還在原位、只是被推到後面
-    let po = 0;
-    for (const k of resultKids) { await window.roamAlphaAPI.moveBlock({ location: { "parent-uid": pg.uid, order: po++ }, block: { uid: k[":block/uid"] } }); promoted++; }   /* 待 live 驗：moveBlock 保序 */
-    // ①b ##／### → Roam heading 屬性並去前綴
-    for (const h of headingUpdates) await window.roamAlphaAPI.updateBlock({ block: { uid: h.uid, string: h.string, heading: h.heading } });   /* 待 live 驗：updateBlock 的 heading 欄位 */
-    // ② 新版全數就位後才刪舊正文（整棵子樹）；不留備份——零位移驗證已保證逐字等值
-    for (const b of topBody) { await window.roamAlphaAPI.deleteBlock({ block: { uid: b.uid } }); removed++; }
-    // ③ 刪提案 root（其下 摘要/建議/已空的重排結果 一併刪）
-    await window.roamAlphaAPI.deleteBlock({ block: { uid: prop.rootUid } });
-    toast(`已套用重排版（新版 ${promoted} 段就位，舊正文 ${removed} 段已刪、不留備份）`);
+    audit = await applyReformatPlan(ctx, roamPlanApi, (m) => console.log("[請CC修改][v10] " + m));
+    if (audit.ok) toast(`已套用重排版（搬 ${audit.moved}／新建 ${audit.created}／改字 ${audit.updated}／刪 ${audit.deleted}；稽核：內容${audit.check.text ? "✅" : "❌"} 引用${audit.check.refs ? "✅" : "❌"} 排除區${audit.check.atoms ? "✅" : "❌"}）`);
+    else toast(`套用未完成（${audit.errors.length} 條問題，見 Console）。正文完整、沒有刪除，可再按一次接著跑`);
   } catch (e) {
-    console.warn("[請CC修改] applyReformat failed", e);
-    if (promoted < resultKids.length) toast("套用失敗（見 Console）：新版只促升了一部分，舊正文仍在原位未刪，請手動整理");
-    else toast(`套用中斷（見 Console）：新版已就位，舊正文刪了 ${removed}/${topBody.length} 段，剩下的在頁面下方請手動刪`);
+    console.warn("[請CC修改] applyReformatPlan failed", e, audit);
+    toast("套用中斷（見 Console）：最後一步之前沒有任何刪除，正文完整——再按一次套用會接著做完");
   }
   setTimeout(() => { applying = false; closeReformatCard(); refreshDecorations(true); }, 60);
 }
@@ -1098,27 +1610,40 @@ function buildReformatCard(pg) {
   const closeX = `<span class="ccm-rc-x" title="關閉">✕</span>`;
   if (st.kind === "B") {   // 提案待審：摘要＋零位移驗證＋👀對照＋✅套用（驗不過鎖住）＋↩退回
     const prop = st.prop;
-    const vr = verifyZeroDrift(gatherBodyBlocks(pg.uid), prop.proposalTexts);   // 只在開卡時驗（不每輪跑）
-    const summary = (prop.summaryStr || "").replace(/^[\s\S]*?【變更摘要】/, "").trim() || "（無摘要）";
+    const { body, atomIds, excludedRoots } = gatherBodyStruct(pg.uid);
+    const refd = inboundRefs(pg.uid, prop.rootUid);
+    const ctx = { body, atomIds, refd, tree: prop.planTree, splits: prop.splits, merges: prop.merges,
+                  bolds: prop.bolds, pageUid: pg.uid, excludedRoots, proposalRootUid: prop.rootUid };
+    const vr = prop.isV9 ? { ok: false, errors: [{ code: "V0_LEGACY", msg: "v9 副本式提案：【重排結果】放的是正文副本。v10 起只收 ((uid)) 計畫，請退回、用新 prompt 重跑" }], stats: null } : verifyReformatPlan(ctx);
     const suggest = (prop.suggestStr || "").replace(/^[\s\S]*?【(?:結構診斷|建議)】/, "").trim();
+
     let verifyHtml;
-    if (vr.ok) verifyHtml = `<div class="ccm-rc-verify ok">零位移驗證：✅ 逐字等值（格式記號守恆）</div>`;
-    else {
-      let why;
-      if (!vr.textOk && vr.firstDiff) why = `內文位移（第 ${vr.firstDiff.pos} 字）<div class="ccm-rc-diff"><span class="old">原稿…${escapeHtml(vr.firstDiff.before)}…</span><span class="new">提案…${escapeHtml(vr.firstDiff.after)}…</span></div>`;
-      else if (!vr.counts.ok) why = "格式記號遺失：" + vr.counts.diff.map((d) => `${tokenLabel(d.kind)} 原${d.body}→提案${d.proposal}`).join("、");
-      else why = "未通過";
-      verifyHtml = `<div class="ccm-rc-verify bad">零位移驗證：❌ ${why}</div>`;
+    if (vr.ok) {
+      const t = vr.stats;
+      verifyHtml = `<div class="ccm-rc-verify ok">計畫驗證：✅ 通過（13 項檢查）<br>` +
+        `<span class="ccm-rc-hint">搬移 ${t.move}（其中整棵照搬 ${t.leafWhole}）｜新標題 ${t.heads}｜切分 ${t.split}→+${t.splitNew}｜合併 ${t.merge}｜加粗 ${t.bold}｜刪空白 ${t.blanks}｜被引用不可動 ${t.refd}　—— 這些數字由 extension 算出，不是 CC 自報</span></div>`;
+    } else {
+      verifyHtml = `<div class="ccm-rc-verify bad">計畫驗證：❌ ${vr.errors.length} 條問題<br>` +
+        vr.errors.slice(0, 6).map((e) => `・${escapeHtml(e.msg)}`).join("<br>") +
+        (vr.errors.length > 6 ? `<br><span class="ccm-rc-hint">其餘 ${vr.errors.length - 6} 條見 Console</span>` : "") + `</div>`;
+      console.warn("[請CC修改] plan 驗證未過", vr.errors);
     }
+    // 新標題是唯一「原稿沒有、卻會進正文」的字：機器只能設限，捏造的短標題擋不住 → 一定要讓 Bear 逐條看
+    const ht = (vr.stats && vr.stats.headTexts) || [];
+    const headsHtml = ht.length
+      ? `<div class="ccm-rc-suggest">🏷 新標題 ${ht.length} 個（原稿沒有的字，請逐條確認）：<br>` +
+        ht.map((t) => `・${escapeHtml(t)}`).join("<br>") +
+        `<br><span class="ccm-rc-hint">其餘內容一個字都沒被複製過——CC 只給了 ((uid))，套用時搬的是你自己的 block</span></div>`
+      : "";
+
     card.innerHTML =
       `<div class="ccm-rc-head">📐 Roam 排版提案 · 待審 ${closeX}</div>` +
-      `<div class="ccm-rc-status">變更摘要：${escapeHtml(summary)}</div>` +
-      verifyHtml +
+      verifyHtml + headsHtml +
       (suggest && suggest !== "無" ? `<div class="ccm-rc-suggest">🧭 結構診斷：${escapeHtml(suggest)}<br><span class="ccm-rc-hint">明細（節次地圖／離群段／接縫／頭尾）在 Roam 提案樹下，套用前先看</span></div>` : "") +
-      `<div class="ccm-rc-actions"><button class="ccm-rc-compare">👀 對照</button><button class="ccm-rc-apply">✅ 套用（不留備份）</button><button class="ccm-rc-return">↩ 退回</button></div>`;
+      `<div class="ccm-rc-actions"><button class="ccm-rc-compare">👀 對照</button><button class="ccm-rc-apply">✅ 套用（搬不刪）</button><button class="ccm-rc-return">↩ 退回</button></div>`;
     card.querySelector(".ccm-rc-compare").onclick = () => openReformatCompare(prop);
     const applyBtn = card.querySelector(".ccm-rc-apply");
-    if (!vr.ok) { applyBtn.disabled = true; applyBtn.classList.add("ccm-rc-disabled"); applyBtn.title = "零位移驗證未過，已鎖住（fail-closed）"; }
+    if (!vr.ok) { applyBtn.disabled = true; applyBtn.classList.add("ccm-rc-disabled"); applyBtn.title = "計畫驗證未過，已鎖住（fail-closed）"; }
     applyBtn.onclick = () => { if (vr.ok) applyReformat(); };
     card.querySelector(".ccm-rc-return").onclick = () => returnReformatProposal(prop);
   } else if (st.kind === "C") {   // 已套用：↺ 還原／🧹 清除備份
@@ -1778,8 +2303,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v9 loaded — 📐 重排版：章節縮排（可折疊骨架）＋【結構診斷】取代【建議】");
-  setTimeout(() => toast("請CC修改 v9 已載入：重排版加章節縮排＋結構診斷"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v10 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
+  setTimeout(() => toast("請CC修改 v10 已載入：可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
