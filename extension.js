@@ -792,23 +792,26 @@ async function copyHugoPrompt() {
   const pg = currentPage(); if (!pg) return toast("找不到目前頁面");
   const todo = countMarkTag(TODO_TAG, pg.uid) + countMarkTag(PROP_TAG, pg.uid);
   const draft = countTagOnPage(DRAFT_TAG, pg.uid);
-  const ready = todo === 0 && draft === 0;
+  // 第三個歸零（2026-09-07 補）：PROTOCOL §七 早就寫了三條，這支打包只檢查兩條，
+  // 於是頁上還掛著未套用的排版提案時，頭上照樣印「已雙歸零，可轉」——版面還沒定就把稿送去轉。
+  const layoutPending = queryReformatProposal(pg.uid) ? 1 : 0;
+  const ready = todo === 0 && draft === 0 && layoutPending === 0;
   const text =
     `【轉 Hugo · 成稿任務】\n` +
     `行為法典（第一步務必讀）：\n` +
-    `  1. 本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（§七 轉 Hugo 兩個歸零＋§八 聲音守則；備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）\n` +
+    `  1. 本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（§七 轉 Hugo 三個歸零＋§八 聲音守則；備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）\n` +
     `  2. 照片解析：本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/blog-composer/ROAM-REFS.md\n` +
     `對象：Roam page「${pg.title}」（page uid: ${pg.uid}）\n` +
-    `本頁狀態：待處理／待審標記 ${todo}、#cc草稿 ${draft}${ready ? "（已雙歸零，可轉）" : "（未歸零，請先擋下並列出）"}\n\n` +
+    `本頁狀態：待處理／待審標記 ${todo}、#cc草稿 ${draft}、未處理的排版提案 ${layoutPending}${ready ? "（已三歸零，可轉）" : "（未歸零，請先擋下並列出）"}\n\n` +
     `步驟：\n` +
     `1. 讀上面兩份法典。\n` +
     `2. 用 Roam MCP 讀整頁 ${pg.uid}（含所有 block；素材／背景子樹一併看，轉稿時排除）。\n` +
-    `3. 檢查兩個歸零：① #請cc修改／#cc提案 標記＝0 ② #cc草稿＝0。不滿足→列出擋下、不轉。\n` +
+    `3. 檢查三個歸零：① #請cc修改／#cc提案 標記＝0 ② #cc草稿＝0 ③ #cc排版提案＝0（版面還沒定就別轉）。不滿足→列出擋下、不轉。\n` +
     `4. 照片：抓草稿裡所有 composer.agoodbear.com/r/<refId> → POST http://localhost:8765/api/roam-ref-fetch {"refIds":[…]} 換原檔 → 走 Hugo 媒材管線（照片縮 1600、HEIC→JPG 驗方向、影片有 trim 裁該段 1080p+poster、PDF 拆解）。\n` +
     `5. 產 content/posts/<type>-post-N.md（Hugo 禁 H1；沿用 ecg／study／travel／erlife-post-N 慣例；跑 zhtw-mcp lint；#cc草稿 出身段落過 /de-ai-zhtw，Bear 原文不進）。\n` +
     `6. Bear review → 部署草稿 → 回 Roam 頁首寫「✅ 已發佈 → <url> <日期>」。\n` +
     `（更多脈絡：查 Supabase handovers 最近幾筆這篇的紀錄；遵守 bundle_hugo_blog_ops。）`;
-  try { await navigator.clipboard.writeText(text); toast(ready ? "已複製「轉 Hugo」任務 ✅ 本頁已雙歸零，貼到新的 CC session" : `已複製「轉 Hugo」任務（本頁還有 ${todo} 標記／${draft} 草稿未清，CC 會擋下）`); }
+  try { await navigator.clipboard.writeText(text); toast(ready ? "已複製「轉 Hugo」任務 ✅ 本頁已三歸零，貼到新的 CC session" : `已複製「轉 Hugo」任務（還有 ${todo} 標記／${draft} 草稿／${layoutPending} 個排版提案未清，CC 會擋下）`); }
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
 }
 
