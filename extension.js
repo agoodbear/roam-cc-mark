@@ -838,7 +838,7 @@ function queryReformatProposal(pageUid) {
   const sortKids = (n) => ((n && n[":block/children"]) || []).slice().sort((a, b) => (a[":block/order"] || 0) - (b[":block/order"] || 0));
   const kids = sortKids(tree);
   const find = (kw) => kids.find((k) => (k[":block/string"] || "").indexOf(kw) !== -1) || null;
-  const summaryNode = find("【變更摘要】"), suggestNode = find("【建議】"), resultNode = find("【重排結果】");
+  const summaryNode = find("【變更摘要】"), suggestNode = find("【結構診斷】") || find("【建議】"), resultNode = find("【重排結果】");   // 【建議】＝v8 以前的舊欄名，仍認得
   const flat = [];
   if (resultNode) { const walk = (n) => { flat.push(n[":block/string"] || ""); for (const c of sortKids(n)) walk(c); }; for (const c of sortKids(resultNode)) walk(c); }
   return {
@@ -913,33 +913,55 @@ async function copyReformatPrompt() {
 對象：Roam page「${pg.title}」（page uid: ${pg.uid}）
 本頁狀態：標記 0／草稿 0（已歸零，可重排）
 
+情境（決定你該往哪裡看）：
+這篇內容已經完整，但它是**經過多輪「請CC修改」之後的稿**——「接」的草稿是插在「當時標記
+掛在哪」而不是「內容該在哪」，「潤」只動被圈的那句、不管前後銜接。所以典型病灶是：段落
+顆粒忽長忽短、同一個主題散在相隔很遠的兩三處、某段讀起來像後來塞進去的、全篇平鋪沒骨架。
+你的工作是把「版面」修到好讀，並把「順序」的問題**全部診斷出來交給 Bear**。
+
 ⚠️ 鐵律（凌駕一切，違反任一條＝任務失敗）：
 1. 這是「排版」不是「改稿」。Bear 的每一個字逐字保留：禁改字、禁換詞、禁增刪內容、
    禁修錯字、禁加任何過場句。extension 會逐字機械比對，有位移＝整份提案作廢。
 2. 你只能做六件事：
    ① 加標題：獨立 block、前綴「## 」（章節）或「### 」（小節）。標題用語取自 Bear
       內文既有詞彙，短、具體、像 Bear 口氣；禁 AI 腔標題（「深入探討」「淺談」「總結」之類）。
-   ② 切分過長段落：只能在原有標點處切，不增刪任何字元。
-   ③ 合併零碎段落：直接串接，不得補字補標點（需要補才通順→寫進【建議】，別動手）。
-   ④ 層級化：連續平行短句縮排為子層（Roam bullet 即清單）。
+      **判準：Bear 把全篇折疊起來只剩這些標題時，要能照著重講一次這篇在說什麼。**
+   ② 層級化（本版重點，直接決定觀看體驗）：
+      (a) **章節縮排**——每一節的正文段落縮排成該節「## 」標題的**子層**，「### 」小節縮在
+          所屬「## 」之下、該小節正文再縮一層。這樣 Bear 在 Roam 折疊 bullet 就能把全篇
+          收成一份骨架。第一個標題之前的開場段落留在頂層、不縮排。
+      (b) 連續平行短句縮排為子層（Roam bullet 即清單）。
+   ③ 切分過長段落：只能在原有標點處切，不增刪任何字元。
+   ④ 合併零碎段落：直接串接，不得補字補標點（需要補才通順→寫進【結構診斷】，別動手）。
    ⑤ 整句加粗：只對「可直接抄進筆記的臨床結論／判斷整句」加 **…**，全篇新增 ≤5 處，
       每處列進變更摘要。Bear 既有的 **、^^、[[]]、(())、{{}}、圖片連結原樣保留、不增不減。
    ⑥ 清雜訊：刪純空白 block。
 3. 不碰：「🗂 素材／背景」子樹、「🗄」備份子樹、「✅ 已發佈」行、所有 #標記 block。
    照片 block（![📷 …](composer.agoodbear.com/…)）逐字保留、跟著原本相鄰段落放。
-4. 禁止段落搬移／跨節重排（敘事順序是 Bear 的作者判斷）。覺得順序該動→寫進【建議】。
+4. **你不准自己搬移段落／跨節重排。**兩個原因：敘事順序是 Bear 的作者判斷；而且 extension
+   的零位移驗證是「全篇逐字串接比對」，你一搬移串接就對不上，整份提案會被鎖死、套不了。
+   → 但該搬的**一段都不准漏**，全部寫進【結構診斷】，Bear 自己拖 bullet 落實。
 5. 原稿一個 block 都不准動（不 update、不 delete、不 move）。你的全部產出只放進下述提案樹。
 
 步驟：
 1. 讀上面 PROTOCOL.md §九。
 2. 用 Roam MCP 讀整頁 ${pg.uid}（含所有 block 與層級；素材子樹讀了理解脈絡但不入結果）。
-3. 在頁面「最底部」建一個 top-level block：「#cc排版提案 【整篇重排版】${reformatDate()}」，其下：
-   - 子 block「【變更摘要】標題 +N｜切分 N｜合併 N｜加粗 N｜清空行 N」，其子層逐條列明細
+3. 在頁面「最底部」建一個 top-level block：「#cc排版提案 【整篇重排版】${reformatDate()}」，其下三個子 block：
+   - 「【變更摘要】標題 +N｜縮排 N 節｜切分 N｜合併 N｜加粗 N｜清空行 N」，其子層逐條列明細
      （每個新標題全文、每處合併/切分/加粗的位置與原文前 10 字）。
-   - 子 block「【建議】」：需改字才能解的排版問題，只建議不動手（沒有就寫「無」）。
-   - 子 block「【重排結果】」：其直接子層＝重排後的完整正文樹（每個頂層段落一個 block，
-     標題 block 用 ##/### 前綴，層級用縮排）。
-4. 回 chat 一份對帳清單：各章標題＋每類變更數；若有【建議】逐條列出。
+   - 「【結構診斷】離群 N｜接縫 N｜頭尾 <撐得住／要補>」——**這一節不准寫「無」交差**，
+     要逐段掃過才准下結論。四個必填子層：
+       (a)【節次地圖】每節一行：「## 標題｜第X–Y段｜這節在講：<一句話>」。
+       (b)【離群段】跟所在節主題不合、或跟同主題段落被隔很遠的段落。一段一行：
+           「第X段〔原文前12字〕｜現在在<節>｜建議移到<節>之後｜理由：<一句>」。
+           逐段檢查後真的沒有 → 寫「逐段檢查 N 段，無離群」（N 要寫出實數）。
+       (c)【接縫】讀起來銜接生硬、像後來塞進去的段落（多輪改稿最常見的病灶）。一處一行：
+           斷在哪兩段之間、缺的是什麼（轉折？前提？跟前面重複了？）。只診斷，不准補字。
+       (d)【頭尾】開頭第一段、結尾最後一段各評一句：還撐不撐得住？撐不住是缺什麼？
+   - 「【重排結果】」：其直接子層＝重排後的完整正文樹（每個頂層段落一個 block，標題 block
+     用 ##／### 前綴，該節正文依 ②(a) 縮排為該標題的子層）。
+4. 回 chat 一份對帳清單：各章標題＋每類變更數；**【結構診斷】的離群段與接縫逐條列在 chat**
+   （Bear 要直接讀，不想再翻回 Roam）。
 （更多脈絡：查 Supabase handovers 最近幾筆這篇的紀錄。）`;
   try { await navigator.clipboard.writeText(text); toast("已複製「整篇重排版」任務 ✅ 貼到新的 CC session"); }
   catch (e) { console.warn(e); toast("複製失敗（剪貼簿權限）"); }
@@ -1078,7 +1100,7 @@ function buildReformatCard(pg) {
     const prop = st.prop;
     const vr = verifyZeroDrift(gatherBodyBlocks(pg.uid), prop.proposalTexts);   // 只在開卡時驗（不每輪跑）
     const summary = (prop.summaryStr || "").replace(/^[\s\S]*?【變更摘要】/, "").trim() || "（無摘要）";
-    const suggest = (prop.suggestStr || "").replace(/^[\s\S]*?【建議】/, "").trim();
+    const suggest = (prop.suggestStr || "").replace(/^[\s\S]*?【(?:結構診斷|建議)】/, "").trim();
     let verifyHtml;
     if (vr.ok) verifyHtml = `<div class="ccm-rc-verify ok">零位移驗證：✅ 逐字等值（格式記號守恆）</div>`;
     else {
@@ -1092,7 +1114,7 @@ function buildReformatCard(pg) {
       `<div class="ccm-rc-head">📐 Roam 排版提案 · 待審 ${closeX}</div>` +
       `<div class="ccm-rc-status">變更摘要：${escapeHtml(summary)}</div>` +
       verifyHtml +
-      (suggest && suggest !== "無" ? `<div class="ccm-rc-suggest">💡 建議：${escapeHtml(suggest)}</div>` : "") +
+      (suggest && suggest !== "無" ? `<div class="ccm-rc-suggest">🧭 結構診斷：${escapeHtml(suggest)}<br><span class="ccm-rc-hint">明細（節次地圖／離群段／接縫／頭尾）在 Roam 提案樹下，套用前先看</span></div>` : "") +
       `<div class="ccm-rc-actions"><button class="ccm-rc-compare">👀 對照</button><button class="ccm-rc-apply">✅ 套用（不留備份）</button><button class="ccm-rc-return">↩ 退回</button></div>`;
     card.querySelector(".ccm-rc-compare").onclick = () => openReformatCompare(prop);
     const applyBtn = card.querySelector(".ccm-rc-apply");
@@ -1663,6 +1685,7 @@ function injectStyle() {
   .ccm-curtain-btn.on{background:#8a6d3b;border-color:#8a6d3b;color:#fff;box-shadow:0 4px 16px rgba(138,109,59,.35);}
   .ccm-hugo-btn{background:#e8f2ec;border:1px solid #b7dcc7;color:#1a7f54;}
   .ccm-hugo-btn:hover{background:#d7ecdf;}
+  .ccm-rc-hint{color:#7a8896;font-size:11px;}
   .ccm-reformat-btn{background:#e8eef8;border:1px solid #b7c9e4;color:#2b5da0;}
   .ccm-reformat-btn:hover{background:#dbe6f4;}
   .ccm-reformat-btn.on{background:#2b5da0;border-color:#2b5da0;color:#fff;box-shadow:0 4px 16px rgba(43,93,160,.35);}
@@ -1755,8 +1778,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v8 loaded — 📐 Roam重排版：套用不留備份、按鈕改名");
-  setTimeout(() => toast("請CC修改 v8 已載入：Roam重排版套用不留備份"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v9 loaded — 📐 重排版：章節縮排（可折疊骨架）＋【結構診斷】取代【建議】");
+  setTimeout(() => toast("請CC修改 v9 已載入：重排版加章節縮排＋結構診斷"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
