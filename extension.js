@@ -1043,14 +1043,40 @@ function verifyZeroDrift(bodyTexts, proposalTexts) {
 
 
 const PLAN_REF_ONLY = /^\(\(([A-Za-z0-9_-]{1,40})\)\)$/;
+const PLAN_HEAD_REF = /^(#{2,3})\s+\(\(([A-Za-z0-9_-]{1,40})\)\)$/;   // 「## ((uid))」＝把 Bear 自己那一句升格成標題
 const PLAN_HEAD_RE  = /^(#{2,3})\s+(.*)$/;
 
-const PLAN_HEAD_MAX_LEN = 30;   // 拿真實文章校準（「這個 case：SLE 合併 APS，TnI 顯著升高」27 字要能過）
-const PLAN_HEAD_MAX_N   = 15;
+// ── v11 標題來源三選一（2026-09-07，Bear「你排的沒有我的靈魂」的正解）────────────
+// 實測：他 18 篇 ecg-post 的 241 個標題，108 個（44%）會被舊護欄（≤30 字、禁數字）擋掉，
+// 被擋的正是「**Step 1:排除artifact**」「如果這時候的AIVR是115下，你還是認得出AIVR嗎?」
+// 這種有靈魂的；能過的只剩「基本知識」「參考資料:」這種死標籤。他的標題是**在說話**，
+// 不是目錄條目。舊護欄的用意（防 CC 把醫學數字寫進不進逐字比對的通道）是對的，
+// 但正解不是放寬長度，是**斷掉 CC 造標題的權利**：
+//   (a) 路標白名單 —— 唯一可以新建的標題，內容固定、不可能夾帶醫學數字
+//   (b) 「## ((uid))」升格 —— 標題是 Bear 自己的 block，uid 不變、字不變、ref 不斷
+//   (c) 其他一律退件
+// 因此長度上限與禁數字**整組拿掉**：那兩條只在「CC 自由造句」的世界裡才有意義。
+const PLAN_HEAD_MAX_N   = 15;   // 新建路標的數量上限（升格不受限，那是 Bear 自己的字）
 const PLAN_BOLD_MAX_N   = 5;
-const PLAN_HEAD_MARKUP = /\[\[|\(\(|\{\{|!\[/;
-const PLAN_HEAD_DIGIT  = /[0-9０-９]/;
 const PLAN_SENT_END    = /[。！？；：!?;:.…」』）\)]/;   // 切點前最後一個非空白字必須是句末標點
+
+// 路標白名單：取自 Bear 18 篇 ecg-post 實測（拉回個案 27 次／10 篇；收尾固定節 38 次／17 篇）
+const PLAN_SIGNPOST_SRC = [
+  "Case繼續", "Case個案繼續", "個案繼續", "Back to case", "再度Back to Case",
+  "拉回正題", "回到正題", "回到此個案", "回到個案", "回到病人", "回到 case",
+  "先問自己幾個問題", "先來幾個問題", "有幾個問題", "我列出幾個好玩的問題",
+  "學習重點", "文章重點", "Learning Points", "參考資料", "參考文獻",
+  "事後回顧感想", "延伸閱讀", "註釋與出處", "統整", "小結",
+];
+// 比對用的正規化：拿掉裝飾（** <mark> 前導 emoji 尾巴的 ~~／冒號），只留核心字。
+// 只影響「比對」，建出來的標題用原字串，所以 ❤️ ~~ 這些他的招牌裝飾會照樣留著。
+function planSignKey(t) {
+  let s = String(t || "").replace(/<\/?mark>/gi, "").replace(/[*`]/g, "").trim();
+  s = s.replace(/^[\s\u3000\u200d\ufe0f\u2190-\u21ff\u2460-\u24ff\u2600-\u27bf\u{1f000}-\u{1faff}]+/u, "");   // 前導 emoji：❤️ ↩️ 🙋 ① 等
+  s = s.replace(/[~～〜\s]+$/g, "").replace(/[:：]+$/g, "");
+  return s.replace(/\s+/g, "").toLowerCase();
+}
+const PLAN_SIGNPOSTS = new Set(PLAN_SIGNPOST_SRC.map(planSignKey));
 
 /**
  * @param {object} ctx
@@ -1071,23 +1097,31 @@ function verifyReformatPlan(ctx) {
 
   // ── 先攤平提案樹，順便做 V1 / V2 ────────────────────────────────────
   const listed = [];          // [{uid, isLeaf, depth}]
-  const heads  = [];
+  const heads  = [];          // 新建的路標標題（白名單）
+  const promos = [];          // 升格：{uid, level} —— 標題是 Bear 自己的 block
   (function walk(nodes, depth) {
     for (const n of nodes) {
       const s = (n.string || "").trim();
+      const mPromo = PLAN_HEAD_REF.exec(s);
       const mRef = PLAN_REF_ONLY.exec(s), mHead = PLAN_HEAD_RE.exec(s);
-      if (mRef)       listed.push({ uid: mRef[1], isLeaf: !(n.children || []).length, depth });
+      if (mPromo) {                       // 「## ((uid))」＝把既有 block 升格；它仍然是正文的一段
+        listed.push({ uid: mPromo[2], isLeaf: !(n.children || []).length, depth });
+        promos.push({ uid: mPromo[2], level: mPromo[1].length });
+      }
+      else if (mRef)  listed.push({ uid: mRef[1], isLeaf: !(n.children || []).length, depth });
       else if (mHead) heads.push({ level: mHead[1].length, text: mHead[2].trim() });
       else            E("V1_FOREIGN", `提案節點不是 ((uid)) 也不是 ##/### 標題：「${s.slice(0, 30)}」`);
       walk(n.children || [], depth + 1);
     }
   })(tree, 0);
 
-  if (heads.length > PLAN_HEAD_MAX_N) E("V2_HEAD_MANY", `新標題 ${heads.length} 個，上限 ${PLAN_HEAD_MAX_N}`);
+  // ── V2 標題來源三選一：路標白名單／升格 Bear 自己的句子／其他一律退件 ──────
+  if (heads.length > PLAN_HEAD_MAX_N) E("V2_HEAD_MANY", `新建路標 ${heads.length} 個，上限 ${PLAN_HEAD_MAX_N}`);
   for (const h of heads) {
-    if ([...h.text].length > PLAN_HEAD_MAX_LEN) E("V2_HEAD_LONG", `標題過長（${[...h.text].length} 字）：${h.text}`);
-    if (PLAN_HEAD_MARKUP.test(h.text))          E("V2_HEAD_MARKUP", `標題內不得出現 [[ (( {{ ![：${h.text}`);
-    if (PLAN_HEAD_DIGIT.test(h.text))           E("V2_HEAD_DIGIT", `標題內不得出現數字：${h.text}`);
+    if (!PLAN_SIGNPOSTS.has(planSignKey(h.text)))
+      E("V2_HEAD_FREE",
+        `標題不准自己造句：「${h.text}」。兩條路：① 用路標白名單（${PLAN_SIGNPOST_SRC.slice(0, 6).join("／")}…）；` +
+        `② 寫「${"#".repeat(h.level)} ((uid))」把 Bear 自己寫的那一句升格成標題。`);
   }
 
   // ── 三種文字操作先解析出集合（V5 要用）───────────────────────────
@@ -1242,6 +1276,8 @@ function verifyReformatPlan(ctx) {
     move: listed.filter((i) => body.has(i.uid)).length,
     leafWhole: listed.filter((i) => i.isLeaf && body.has(i.uid)).length,
     heads: heads.length, headTexts: heads.map((h) => h.text),
+    promote: promos.length,
+    promoTexts: promos.map((pm) => `${"#".repeat(pm.level)} ${(body.get(pm.uid) || {}).string || pm.uid}`),
     split: splits.length, splitNew: newSplitUids.size,
     merge: merges.length, mergedAway: mergedAway.size,
     bold: bolds.length, blanks: blanks.size, refd: refd.size,
@@ -1275,6 +1311,7 @@ function planCoveredElsewhere(uid, listedSet, body) {
 // ── v10：applyReformatPlan（自 scratchpad/plan-apply.mjs 移植；端到端＋中斷重跑實測通過）──
 const APLAN_REF = /^\(\(([A-Za-z0-9_-]{1,40})\)\)$/;
 const APLAN_HEAD = /^(#{2,3})\s+(.*)$/;
+const APLAN_HEAD_REF = /^(#{2,3})\s+\(\(([A-Za-z0-9_-]{1,40})\)\)$/;   // 升格：標題就是 Bear 既有的那個 block
 
 async function applyReformatPlan(ctx, api, log = () => {}) {
   const { body, atomIds = new Set(), refd = new Set(), tree = [], pageUid,
@@ -1315,8 +1352,18 @@ async function applyReformatPlan(ctx, api, log = () => {}) {
   async function layout(parentUid, nodes) {
     for (const n of nodes) {
       const s = (n.string || "").trim();
-      const mRef = APLAN_REF.exec(s), mHead = APLAN_HEAD.exec(s);
-      if (mHead) {
+      const mRef = APLAN_REF.exec(s), mHead = APLAN_HEAD.exec(s), mPromo = APLAN_HEAD_REF.exec(s);
+      if (mPromo) {                       // 升格：Bear 自己的 block 搬到位、只補 heading 屬性，字與 uid 都不動
+        const uid = mPromo[2], level = mPromo[1].length;
+        await api.move({ parent: parentUid, order: "last", uid });
+        audit.moved++;
+        const cur = await api.pull(uid);
+        if (cur && (cur.heading || 0) !== level) {
+          await api.update({ uid, string: cur.string, heading: level });
+          audit.updated++;
+        }
+        if ((n.children || []).length) await layout(uid, n.children);
+      } else if (mHead) {
         const level = mHead[1].length, text = mHead[2].trim();
         const key = `${parentUid} ${text}`;
         let uid = headingCache.get(key);
@@ -1426,7 +1473,8 @@ const roamPlanApi = {
   create: ({ parent, order, uid, string, heading }) =>
     window.roamAlphaAPI.createBlock({ location: { "parent-uid": parent, order }, block: heading ? { uid, string, heading } : { uid, string } }),
   move: ({ parent, order, uid }) => window.roamAlphaAPI.moveBlock({ location: { "parent-uid": parent, order }, block: { uid } }),
-  update: ({ uid, string }) => window.roamAlphaAPI.updateBlock({ block: { uid, string } }),
+  update: ({ uid, string, heading }) =>
+    window.roamAlphaAPI.updateBlock({ block: heading == null ? { uid, string } : { uid, string, heading } }),
   del: (uid) => window.roamAlphaAPI.deleteBlock({ block: { uid } }),
 };
 
@@ -1451,7 +1499,8 @@ async function bumpVersionLog(pageUid, stats, audit, api) {
   const stamp = reformatStamp();
   const parts = [];
   if (stats.move)   parts.push(`搬移 ${stats.move}`);
-  if (stats.heads)  parts.push(`新標題 ${stats.heads}`);
+  if (stats.promote) parts.push(`升格標題 ${stats.promote}`);
+  if (stats.heads)  parts.push(`新建路標 ${stats.heads}`);
   if (stats.split)  parts.push(`切分 ${stats.split}→+${stats.splitNew}`);
   if (stats.merge)  parts.push(`合併 ${stats.merge}`);
   if (stats.bold)   parts.push(`加粗 ${stats.bold}`);
@@ -1503,15 +1552,46 @@ ${(() => { const r = [...inboundRefs(pg.uid, null)]; const b = gatherBodyStruct(
 這篇內容已經完整，但它是**經過多輪「請CC修改」之後的稿**——「接」的草稿是插在「當時標記
 掛在哪」而不是「內容該在哪」，「潤」只動被圈的那句、不管前後銜接。所以典型病灶是：段落
 顆粒忽長忽短、同一個主題散在相隔很遠的兩三處、某段讀起來像後來塞進去的、全篇平鋪沒骨架。
-你的工作是把「版面」修到好讀，並把「順序」的問題**全部診斷出來交給 Bear**。
+
+⚠️ 最重要的一件事——**排版順序不是你的判斷，是 Bear 的骨架。**
+他 37 篇 ECG 文走同一條敘事骨架（Fable 5 逐篇提煉、原文佐證見
+/Users/tsaojian-hsiung/Desktop/Claude Code專用檔/ecg-writing-style-profile.md 的 §1，
+**動手前先讀那一節**）：
+
+  ① 邀請開場（一句，「今天這個 case 很有趣」）
+  ② 病人一句話速寫（年齡＋性別＋主訴＋現場畫面，極短）
+  ③ 丟第一張 ECG ＋ 五宮格判讀（Rate-Rhythm-Axis-Interval-Ischemia）
+  ④ 先問自己幾個問題 Q1/Q2/Q3…（全文路線圖，隱形鋼骨）
+  ⑤ 教學離題（DDx／機轉／文獻）  ┐
+  ⑥ 拉回個案（明確路標）          ┘ ⑤⑥ **反覆交替 n 輪**，像剝洋蔥（post-16 有四次）
+  ⑦ 反轉／serial ECG 揭示
+  ⑧ 診斷揭曉（CAG 報告）
+  ⑨ 感悟／後怕／急診人生
+  ⑩ 學習重點（編號清單）
+  ⑪ 參考資料
+
+你的工作是**把每一段歸到它該在的格子**，再照 ①②③④→(⑤⑥)×n→⑦⑧⑨⑩⑪ 落位。
+歸格要交代理由（見【結構診斷】的【骨架對位】），Bear 要能一條一條檢查你有沒有亂歸。
+不是每篇都用滿 11 格；缺的格子寫「本篇無」，**不要自己生內容去填**。
 
 ⚠️ 鐵律（凌駕一切，違反任一條＝任務失敗）：
 1. 這是「排版」不是「改稿」。**v10 起你根本不會碰到 Bear 的字**——提案樹裡只放
    ((uid)) 與新標題，套用時 extension 搬的是 Bear 自己的 block。所以「不改字」不是
    你要小心的事，是結構上做不到的事。你要小心的是「有沒有漏段、有沒有動到不該動的」。
 2. 你只能做六件事：
-   ① 加標題：獨立 block、前綴「## 」（章節）或「### 」（小節）。標題用語取自 Bear
-      內文既有詞彙，短、具體、像 Bear 口氣；禁 AI 腔標題（「深入探討」「淺談」「總結」之類）。
+   ① 加標題：**你不准自己造標題。** 只有兩種來源，各自寫成獨立 block：
+      (a) **升格**（優先用這個）：「## ((uid))」或「### ((uid))」——把 Bear **自己寫的那一句**
+          升格成標題。字不變、uid 不變、引用不斷，長度與數字都不受限制。
+          他的標題天生就是在說話：「**Step 1:排除artifact**」「如果這時候的AIVR是115下，
+          你還是認得出AIVR嗎?」「這.....是不是VT」「要診斷出inverted U wave，首先有一個難關。」
+          —— 從內文找那一句，升格它。這是「有靈魂」跟「像目錄」的分水嶺。
+      (b) **路標白名單**：只有這些字准新建，其他一律退件——
+          Case繼續／Case個案繼續／❤️Case個案繼續／↩️Back to case／Back to Case／拉回正題～～／
+          回到此個案～～／回到病人／先問自己幾個問題／學習重點:／文章重點:／參考資料:／
+          參考文獻／事後回顧感想／延伸閱讀／Learning Points:／統整／小結
+          （前後可加 ❤️ ↩️ ** <mark> ~~ 冒號等裝飾，會照你寫的樣子建出來。）
+      ⑤⑥ 每交替一輪，就用一個 (b) 的拉回路標把讀者接回病人身上——那是他的節拍器
+      （18 篇裡出現 27 次）。
       **判準：Bear 把全篇折疊起來只剩這些標題時，要能照著重講一次這篇在說什麼。**
    ② 層級化（本版重點，直接決定觀看體驗）：
       (a) **章節縮排**——每一節的正文段落縮排成該節「## 」標題的**子層**，「### 」小節縮在
@@ -1530,9 +1610,11 @@ ${(() => { const r = [...inboundRefs(pg.uid, null)]; const b = gatherBodyStruct(
    從樹算出來並列在卡片上，不靠你自報。但**被其他 block 引用的段落是石頭**（清單見下），
    只准整段搬，不准切、不准併掉、不准加粗、不准刪。
 5. 原稿一個 block 都不准動（不 update、不 delete、不 move）。你的全部產出只放進下述提案樹。
-6. 【重排結果】底下每個節點的字串**只准是兩種之一**，多一個字都會被退件：
-   ・「((uid))」——引用正文的某個 block
-   ・「## 標題」或「### 標題」——新標題，≤30 字、全篇 ≤15 個、**不得含數字**、不得含 [[ (( {{ ![
+6. 【重排結果】底下每個節點的字串**只准是三種之一**，多一個字都會被退件：
+   ・「((uid))」——正文的某個 block，維持原樣
+   ・「## ((uid))」／「### ((uid))」——**升格**：同一個 block，只是變成標題（字與 uid 不動）
+   ・「## 路標」／「### 路標」——新建，且**必須命中白名單**（見鐵律 2①(b)），全篇 ≤15 個
+   自由造句的標題會被 V2_HEAD_FREE 直接退件——長度與數字限制已經拿掉，因為造句那條路封死了。
    **葉節點（提案裡沒有子節點）＝這段連同它現有的整棵子樹原樣照搬**；有子節點＝它的子層由你明列。
    所以只有動到結構的地方要展開，沒動的整棵寫一行就好。順序就是樹本身，不要寫 order／index。
 
@@ -1540,25 +1622,29 @@ ${(() => { const r = [...inboundRefs(pg.uid, null)]; const b = gatherBodyStruct(
 1. 讀上面 PROTOCOL.md §九。
 2. 用 Roam MCP 讀整頁 ${pg.uid}（含所有 block 與層級；素材子樹讀了理解脈絡但不入結果）。
 3. 在頁面「最底部」建一個 top-level block：「#cc排版提案 【整篇重排版】${reformatDate()}」，其下三個子 block：
-   - 「【變更摘要】標題 +N｜縮排 N 節｜切分 N｜合併 N｜加粗 N｜清空行 N」，其子層逐條列明細
-     （每個新標題全文、每處合併/切分/加粗的位置與原文前 10 字）。
+   - 「【變更摘要】升格標題 N｜新建路標 N｜縮排 N 節｜切分 N｜合併 N｜加粗 N｜清空行 N」，
+     其子層逐條列明細（每個升格句的 uid＋全文、每個路標全文、每處合併/切分/加粗的位置與原文前 10 字）。
    - 「【結構診斷】離群 N｜接縫 N｜頭尾 <撐得住／要補>」——**這一節不准寫「無」交差**，
-     要逐段掃過才准下結論。四個必填子層：
-       (a)【節次地圖】每節一行：「## 標題｜第X–Y段｜這節在講：<一句話>」。
-       (b)【離群段】跟所在節主題不合、或跟同主題段落被隔很遠的段落。一段一行：
+     要逐段掃過才准下結論。五個必填子層：
+       (a)【骨架對位】**這一格是這一版的重點**。骨架 ①–⑪ 逐格一行：
+           「② 病人一句話速寫｜((uid)) 或「本篇無」｜為什麼歸這格：<一句>」。
+           歸不進任何一格的段落，列在最後「⑫ 歸不進去的」，一段一行寫理由。
+       (b)【節次地圖】每節一行：「## 標題｜第X–Y段｜這節在講：<一句話>」。
+       (c)【離群段】跟所在節主題不合、或跟同主題段落被隔很遠的段落。一段一行：
            「第X段〔原文前12字〕｜現在在<節>｜建議移到<節>之後｜理由：<一句>」。
            逐段檢查後真的沒有 → 寫「逐段檢查 N 段，無離群」（N 要寫出實數）。
-       (c)【接縫】讀起來銜接生硬、像後來塞進去的段落（多輪改稿最常見的病灶）。一處一行：
+       (d)【接縫】讀起來銜接生硬、像後來塞進去的段落（多輪改稿最常見的病灶）。一處一行：
            斷在哪兩段之間、缺的是什麼（轉折？前提？跟前面重複了？）。只診斷，不准補字。
-       (d)【頭尾】開頭第一段、結尾最後一段各評一句：還撐不撐得住？撐不住是缺什麼？
+       (e)【頭尾】開頭第一段、結尾最後一段各評一句：還撐不撐得住？撐不住是缺什麼？
+           對照骨架①邀請開場與⑨感悟——這兩格他幾乎每篇都有，缺了要講。
    - 「【切分】」（沒有就不建）每行一條：
        ((uid))｜切點：「…切點前12字」‖「切點後12字…」→ ((新uid))
        ((uid))｜依換行 → ((新uid1)) ((新uid2)) …
    - 「【合併】」（沒有就不建）每行一條：((存活uid)) ＋ ((被併掉uid)) …｜接合：無／換行／空格
    - 「【加粗】」（沒有就不建）每行一條：((uid)) 「整句」　全篇 ≤5
    - 「【重排結果】」：其直接子層＝重排後的完整正文樹，**每個節點只能是 ((uid)) 或 ##／### 標題**
-     （見鐵律 6）。章節縮排：正文縮成該節標題的子層。
-4. 回 chat 一份對帳清單：各章標題＋每類變更數；**【結構診斷】的離群段與接縫逐條列在 chat**
+     （見鐵律 6）。章節縮排：正文縮成該節標題的子層。順序＝骨架順序，不是原稿順序。
+4. 回 chat 一份對帳清單：**【骨架對位】整張表**＋各章標題＋每類變更數；離群段與接縫逐條列在 chat
    （Bear 要直接讀，不想再翻回 Roam）。
 （更多脈絡：查 Supabase handovers 最近幾筆這篇的紀錄。）`;
   try { await navigator.clipboard.writeText(text); toast("已複製「整篇重排版」任務 ✅ 貼到新的 CC session"); }
@@ -1700,20 +1786,27 @@ function buildReformatCard(pg) {
     if (vr.ok) {
       const t = vr.stats;
       verifyHtml = `<div class="ccm-rc-verify ok">計畫驗證：✅ 通過（13 項檢查）<br>` +
-        `<span class="ccm-rc-hint">搬移 ${t.move}（其中整棵照搬 ${t.leafWhole}）｜新標題 ${t.heads}｜切分 ${t.split}→+${t.splitNew}｜合併 ${t.merge}｜加粗 ${t.bold}｜刪空白 ${t.blanks}｜被引用不可動 ${t.refd}　—— 這些數字由 extension 算出，不是 CC 自報</span></div>`;
+        `<span class="ccm-rc-hint">搬移 ${t.move}（其中整棵照搬 ${t.leafWhole}）｜升格標題 ${t.promote}｜新建路標 ${t.heads}｜切分 ${t.split}→+${t.splitNew}｜合併 ${t.merge}｜加粗 ${t.bold}｜刪空白 ${t.blanks}｜被引用不可動 ${t.refd}　—— 這些數字由 extension 算出，不是 CC 自報</span></div>`;
     } else {
       verifyHtml = `<div class="ccm-rc-verify bad">計畫驗證：❌ ${vr.errors.length} 條問題<br>` +
         vr.errors.slice(0, 6).map((e) => `・${escapeHtml(e.msg)}`).join("<br>") +
         (vr.errors.length > 6 ? `<br><span class="ccm-rc-hint">其餘 ${vr.errors.length - 6} 條見 Console</span>` : "") + `</div>`;
       console.warn("[請CC修改] plan 驗證未過", vr.errors);
     }
-    // 新標題是唯一「原稿沒有、卻會進正文」的字：機器只能設限，捏造的短標題擋不住 → 一定要讓 Bear 逐條看
+    // v11：新建的標題只能是路標白名單（機器擋死），升格的標題是 Bear 自己的句子。
+    // 兩種都列出來，因為「哪一句被拉去當標題」本身就是排版決定，要他看得到。
     const ht = (vr.stats && vr.stats.headTexts) || [];
-    const headsHtml = ht.length
-      ? `<div class="ccm-rc-suggest">🏷 新標題 ${ht.length} 個（原稿沒有的字，請逐條確認）：<br>` +
-        ht.map((t) => `・${escapeHtml(t)}`).join("<br>") +
-        `<br><span class="ccm-rc-hint">其餘內容一個字都沒被複製過——CC 只給了 ((uid))，套用時搬的是你自己的 block</span></div>`
-      : "";
+    const pt = (vr.stats && vr.stats.promoTexts) || [];
+    const headsHtml =
+      (pt.length
+        ? `<div class="ccm-rc-suggest">🏷 升格成標題 ${pt.length} 句（都是你自己寫的字，一字未改）：<br>` +
+          pt.map((t) => `・${escapeHtml(t.length > 46 ? t.slice(0, 46) + "…" : t)}`).join("<br>") + `</div>`
+        : "") +
+      (ht.length
+        ? `<div class="ccm-rc-suggest">🚩 新建路標 ${ht.length} 個（唯一原稿沒有的字，只能出自白名單）：<br>` +
+          ht.map((t) => `・${escapeHtml(t)}`).join("<br>") +
+          `<br><span class="ccm-rc-hint">其餘內容一個字都沒被複製過——CC 只給了 ((uid))，套用時搬的是你自己的 block</span></div>`
+        : "");
 
     card.innerHTML =
       `<div class="ccm-rc-head">📐 Roam 排版提案 · 待審 ${closeX}</div>` +
@@ -2383,8 +2476,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v10.3 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
-  setTimeout(() => toast("請CC修改 v10.3 已載入：面板會標明改片段還是整段＋版次表自動更新＋可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v11 loaded — 📐 排版依據換成 Bear 的敘事骨架；標題只准『升格他自己的句子』或『路標白名單』，CC 不准造標題");
+  setTimeout(() => toast("請CC修改 v11 已載入：標題改成『升格你自己那句』或路標白名單（CC 不准造標題）＋排版照你的 ECG 敘事骨架落位"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
