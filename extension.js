@@ -678,14 +678,44 @@ function setIntent(it) {
   panelIntent = it;
   panelEl.querySelectorAll(".ccm-intents button").forEach((btn) => btn.classList.toggle("on", btn.dataset.intent === it));
   panelEl.querySelector(".ccm-hint").textContent = INTENT_HINT[it];
+  renderPickedLine();
   panelEl.querySelector(".ccm-chips").style.display = it === "潤" ? "flex" : "none";
 }
 function showTrigger(x, y) { triggerBtn.style.display = "flex"; triggerBtn.style.left = clampX(x, triggerBtn.offsetWidth) + "px"; triggerBtn.style.top = y + "px"; }
 function hideTrigger() { if (triggerBtn) triggerBtn.style.display = "none"; }
+
+// ── 面板的「目標行」：這次到底要改片段還是整段（2026-09-07）──────────────
+// 為什麼要做：Bear 點了「＋新段」（整段操作）之後，在面板上把意圖改成「潤」，
+// 於是原本選取的那段字被丟掉、變成整段潤稿——中間沒有任何訊號，他連中兩次。
+// 根因不是「意圖選錯」，是「目標被換掉而沒有提示」。所以這裡不擋、不問，只把
+// 真實目標一直顯示在面板上，而且**跟著意圖即時重算**（切到潤就會亮警示）。
+function renderPickedLine() {
+  const el = panelEl && panelEl.querySelector(".ccm-picked");
+  if (!el || !pending) return;
+  const marks = pending.mode === "edit" ? [{ quote: pending.quote }] : (pending.marks || []);
+  const n = marks.length;
+  const withQuote = marks.filter((m) => m && m.quote);
+  el.classList.remove("ccm-picked-warn");
+  if (withQuote.length === n && n > 0) {                       // 有選取片段：正常
+    const q = withQuote[0].quote;
+    el.textContent = n > 1 ? `✂️ 只改這 ${n} 處選取的字` : `✂️ 只改：「${q}」`;
+    return;
+  }
+  if (panelIntent === "接") {                                   // 整段＋接＝本來就該這樣，不用警示
+    el.textContent = n > 1 ? `＋ 在這 ${n} 個 block 後面各插入新段` : "＋ 在這個 block 後面插入新段（以整段為單位）";
+    return;
+  }
+  el.classList.add("ccm-picked-warn");                          // 整段＋潤/查/議＝多半不是本意
+  el.textContent = n > 1
+    ? `⚠️ 這 ${n} 段都會被當成「整段」處理，不是你選取的字`
+    : "⚠️ 這是「整段 block」，不是你選取的某段字——要只改某一句，取消後重新選字再按「✏️ 請CC修改」";
+}
+
 function showPanel(x, y, label, prefill, ref) {
   const isEdit = pending && pending.mode === "edit";
   panelEl.querySelector(".ccm-head").textContent = isEdit ? "✏️ 修改標記" : "✏️ 請CC修改";
   panelEl.querySelector(".ccm-picked").textContent = label;
+  renderPickedLine();   // 用 pending 的實際內容覆蓋 label（label 只是後備）
   const refEl = panelEl.querySelector(".ccm-ref");
   if (ref) { refEl.textContent = ref; refEl.style.display = "block"; } else { refEl.textContent = ""; refEl.style.display = "none"; }
   panelEl.querySelector(".ccm-delete").style.display = isEdit ? "inline-block" : "none";
@@ -2228,6 +2258,7 @@ function injectStyle() {
   .ccm-intents button.on{background:#2b7de0;color:#fff;border-color:#2b7de0;}
   .ccm-hint{font-size:11px;color:#98a2ac;margin-bottom:7px;}
   .ccm-panel .ccm-picked{font-size:11.5px;color:#8a94a0;background:#f4f6f8;border-radius:6px;padding:4px 7px;margin-bottom:8px;max-height:42px;overflow:hidden;}
+  .ccm-panel .ccm-picked.ccm-picked-warn{color:#8a4b00;background:#fff4d6;border:1px solid #f0a020;font-weight:600;max-height:none;}
   .ccm-ref{display:none;font-size:11.5px;color:#1a7f54;background:#eefaf3;border:1px solid #cdeeda;border-radius:6px;padding:5px 8px;margin-bottom:8px;line-height:1.5;max-height:72px;overflow:auto;}
   .ccm-panel textarea{width:100%;min-height:50px;resize:vertical;border:1px solid #d5dbe2;border-radius:7px;padding:7px 8px;font-size:13px;font-family:inherit;line-height:1.5;outline:none;box-sizing:border-box;}
   .ccm-panel textarea:focus{border-color:#2b7de0;box-shadow:0 0 0 3px rgba(43,125,224,.12);}
@@ -2351,8 +2382,8 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v10.1 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
-  setTimeout(() => toast("請CC修改 v10.1 已載入：版次表自動更新＋可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log("[請CC修改] v10.2 loaded — 📐 重排版改計畫驅動：提案只放 ((uid))、可搬移/合併、套用搬不刪（uid 與 block ref 全保）");
+  setTimeout(() => toast("請CC修改 v10.2 已載入：面板會標明改片段還是整段＋版次表自動更新＋可搬移段落、套用不刪 block（引用不會再斷）"), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
