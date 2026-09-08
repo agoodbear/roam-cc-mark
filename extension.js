@@ -16,8 +16,8 @@
 // ⚠️ 改完程式碼一定要 bump 這個版本號 —— 它是 Bear reload 後唯一能確認「新碼有沒有上」的訊號。
 // （2026-09-08 踩過：改了跨 block 支援卻沒 bump，Bear reload 後看到的還是 v11 的 toast，
 //   完全無法判斷載入成功與否。版本號散在 toast 字串裡是根因，故抽成常數。）
-const CCM_VERSION = "v13";
-const CCM_VERSION_NOTE = "跨 block 標記改良：標記掛最後一段（不再插在中間切開內容），範圍內每一段都上底線";
+const CCM_VERSION = "v14";
+const CCM_VERSION_NOTE = "重排版自動辨識 /ecg-case 稿：骨架已定案，只做版面、不動順序";
 
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
@@ -1042,6 +1042,26 @@ function pageHasPublished(pageUid) {
     return ((tree && tree[":block/children"]) || []).some((k) => /^\s*✅\s*已發佈/.test(k[":block/string"] || ""));
   } catch (e) { return false; }
 }
+// 這一頁是不是走 /ecg-case 產出的稿?（骨架在動筆前就跟 Bear 討論定案，重排版不該重排順序）
+// 判準：頁內同時存在「路線圖」與「擺盪表」兩個 block —— 那是 /ecg-case 主軸備忘錄的產物。
+// 為什麼要自動偵測：重排版是「開新 session」做的，那個 CC 只拿到打包文字、不會知道
+// 這份稿的骨架是討論出來的，會照 ①–⑪ 硬套，把 Bear 逐輪談定的轉折當成離群段建議搬走。
+// 能給機器做的就別留給紀律（2026-09-08 Bear 問「重排版會不會把骨架重整?」而立）。
+function isEcgCaseDraft(pageUid) {
+  try {
+    const rows = window.roamAlphaAPI.q(
+      `[:find ?s :where [?b :block/page ?pg] [?pg :block/uid "${pageUid}"] [?b :block/string ?s]]`) || [];
+    let hasMap = false, hasSwing = false;
+    for (const [str] of rows) {
+      if (!str) continue;
+      if (str.includes("路線圖")) hasMap = true;
+      if (str.includes("擺盪表")) hasSwing = true;
+      if (hasMap && hasSwing) return true;
+    }
+    return false;
+  } catch (e) { return false; }
+}
+
 // 查本頁 #cc排版提案 root，解析【變更摘要】/【建議】/【重排結果】uid 與內容；【重排結果】子樹攤平＝待驗正文
 function queryReformatProposal(pageUid) {
   let rootUid = null;
@@ -1676,7 +1696,22 @@ async function copyReformatPrompt() {
 `【整篇重排版 · 排版任務】
 行為法典（第一步務必讀）：本機 /Users/tsaojian-hsiung/Desktop/Claude Code專用檔/roam-cc-mark/PROTOCOL.md（§九 整篇重排版；備援 raw：https://raw.githubusercontent.com/agoodbear/roam-cc-mark/main/PROTOCOL.md）
 對象：Roam page「${pg.title}」（page uid: ${pg.uid}）
-本頁狀態：標記 0／草稿 0（已歸零，可重排）
+本頁狀態：標記 0／草稿 0（已歸零，可重排）${isEcgCaseDraft(pg.uid) ? `
+════════════════════════════════════════════════════════
+🔴 這份稿走過 /ecg-case——**骨架在動筆之前就跟 Bear 逐輪討論定案了**
+（頁內偵測到「路線圖」與「擺盪表」，那是 /ecg-case 主軸備忘錄的產物）
+
+  1. **順序不准動。** 路線圖 Q1–Qn 就是骨架 ④、擺盪表就是 (⑤↔⑥)×n，格子在寫之前
+     就填好了，不是事後排出來的。【離群段】一律寫「本篇順序由 /ecg-case 定案，不提
+     搬移建議」——**不要把 Bear 談定的轉折當成離群段。**
+  2. **【骨架對位】照那份路線圖抄，不要自己重新歸格。** 歸不進 ①–⑪ 的段落寫進 ⑫ 並
+     註明「/ecg-case 主軸產物，非離群」，不要硬塞、也不要建議刪。
+  3. **你只做版面**：章節縮排（最有價值，別省）、切分過長段落、合併零碎段落、
+     加粗 ≤5、清空白行。標題一律走升格「## ((uid))」，**不新建路標**。
+  4. **仍要做**：【接縫】與【頭尾】照常逐段檢查並回報——銜接生硬跟骨架對不對是兩件事。
+
+  完整規則見 PROTOCOL.md §九 的「走過 /ecg-case 的稿子」小節。
+════════════════════════════════════════════════════════` : ""}
 ${(() => { const r = [...inboundRefs(pg.uid, null)]; const b = gatherBodyStruct(pg.uid).body;
   const lines = r.filter((u) => b.has(u)).map((u) => `   ((${u}))　${(b.get(u).string || "").replace(/\n/g, " ").slice(0, 24)}`);
   return lines.length ? `\n⚠️ 石頭清單（這 ${lines.length} 段被其他 block 引用，只准整段搬，不准切/併/加粗/刪）：\n${lines.join("\n")}\n` : "\n（本頁沒有被外部引用的段落）\n"; })()}
