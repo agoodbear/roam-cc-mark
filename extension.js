@@ -13,6 +13,12 @@
 // 真相=Roam 子 block；畫面每次從 graph 重讀重畫。CC 端行為見同資料夾 PROTOCOL.md。
 // ────────────────────────────────────────────────────────────────
 
+// ⚠️ 改完程式碼一定要 bump 這個版本號 —— 它是 Bear reload 後唯一能確認「新碼有沒有上」的訊號。
+// （2026-09-08 踩過：改了跨 block 支援卻沒 bump，Bear reload 後看到的還是 v11 的 toast，
+//   完全無法判斷載入成功與否。版本號散在 toast 字串裡是根因，故抽成常數。）
+const CCM_VERSION = "v12";
+const CCM_VERSION_NOTE = "跨 block 標記：框選連續多段＝一個標記（含【範圍】），套用可分段替換或合併";
+
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
 const DRAFT_TAG = "cc草稿";
@@ -83,7 +89,7 @@ function parseMark(s) {
   };
   const unquote = (v) => (v == null ? "" : v.replace(/^「/, "").replace(/」$/, ""));
   let intent = "潤", detail = "";
-  const insRaw = seg("【指令】", "【第", "【原文】", "【提案】", "【備註】");
+  const insRaw = seg("【指令】", "【範圍】", "【第", "【原文】", "【提案】", "【備註】");
   if (insRaw != null) {
     const im = insRaw.match(/^(潤|接|查|議)\s*[:：]?\s*([\s\S]*)$/);
     if (im) { intent = im[1]; detail = im[2].trim(); } else detail = insRaw;
@@ -93,13 +99,25 @@ function parseMark(s) {
     state: review ? "review" : "todo", intent, instruction: detail,
     occurrence: occ ? parseInt(occ[1], 10) : 1,
     quote: unquote(seg("【原文】", "【提案】", "【備註】")),
+    rangeUids: (function () {
+      const r = seg("【範圍】", "【第", "【原文】", "【提案】", "【備註】");
+      if (!r) return null;
+      const ids = r.match(/[A-Za-z0-9_-]{9}/g);
+      return ids && ids.length ? ids : null;
+    })(),
     proposal: unquote(seg("【提案】", "【備註】")),
     note: seg("【備註】") || "",
   };
 }
-function markString(intent, instruction, quote, occurrence) {
+function markString(intent, instruction, quote, occurrence, rangeUids) {
   const head = instruction ? `${intent}：${instruction}` : intent;
   let s = `#${TODO_TAG} 【指令】${head}`;
+  // 跨 block 標記：一個標記涵蓋連續數段（Bear 框選 A、B 是因為它們在講同一件事，
+  // 拆成兩個獨立標記會讓 CC 兩邊都看不到全貌）。範圍記 uid 純文字，不用 (( )) —
+  // block ref 的預覽會夾帶對方的圖片，逐行掃描時會誤判。
+  if (Array.isArray(rangeUids) && rangeUids.length > 1) {
+    s += ` 【範圍】共 ${rangeUids.length} 段：本段 + ${rangeUids.slice(1).join(" ")}`;
+  }
   if (quote) { if (occurrence > 1) s += ` 【第${occurrence}處】`; s += ` 【原文】「${quote}」`; }
   return s;
 }
@@ -431,9 +449,9 @@ function refreshDecorations(force) {
 const debouncedRefresh = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(refreshDecorations, 250); };
 
 // ── 建立 / 修改 / 刪除 / 接受 ───────────────────────────────
-async function createMark(parentUid, intent, instruction, quote, occurrence) {
+async function createMark(parentUid, intent, instruction, quote, occurrence, rangeUids) {
   const uid = window.roamAlphaAPI.util.generateUID();
-  await window.roamAlphaAPI.createBlock({ location: { "parent-uid": parentUid, order: "last" }, block: { string: markString(intent, instruction, quote, occurrence), uid } });
+  await window.roamAlphaAPI.createBlock({ location: { "parent-uid": parentUid, order: "last" }, block: { string: markString(intent, instruction, quote, occurrence, rangeUids), uid } });
   setTimeout(() => refreshDecorations(true), 120);
 }
 async function updateMark(childUid, intent, instruction, quote, occurrence) {
@@ -492,6 +510,28 @@ async function acceptMark(m, mode) {
     if (mode === "clear") {
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
       toast("已完成（未改字）");
+    } else if (replace && m.proposal && m.rangeUids && m.rangeUids.length > 1 && !m.quote) {
+      // ── 跨 block 標記（Bear 框選 A、B 因為它們在講同一件事）─────────────
+      // 兩種語意，用提案裡有沒有「---」分隔線來判斷：
+      //   有 N-1 條分隔線 → 各段各自替換（「這幾段語氣統一一下」）
+      //   沒有分隔線     → 合併成一段（「這兩段講同一件事，併起來」）
+      // ⚠️ 合併時**不刪任何 block**：其餘段改寫成可刪提示並把原文留在該行，
+      //    因為 block 可能有 children，程式擅自刪會連子樹一起帶走。
+      const uids = m.rangeUids;
+      const parts = m.proposal.split(/\n\s*-{3,}\s*\n/).map((x) => x.trim()).filter((x) => x);
+      if (parts.length === uids.length) {
+        for (let i = 0; i < uids.length; i++) await window.roamAlphaAPI.updateBlock({ block: { uid: uids[i], string: parts[i] } });
+        await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+        toast(`已套用：${uids.length} 段各自替換`);
+      } else {
+        await window.roamAlphaAPI.updateBlock({ block: { uid: uids[0], string: m.proposal } });
+        for (let i = 1; i < uids.length; i++) {
+          const old = blockString(uids[i]);
+          await window.roamAlphaAPI.updateBlock({ block: { uid: uids[i], string: "🗑 已併入上一段（確認後請自行刪除）｜原文：" + old } });
+        }
+        await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+        toast(`已合併進第 1 段；其餘 ${uids.length - 1} 段標成可刪（原文留在該行，沒有刪掉任何 block）`);
+      }
     } else if (replace && m.proposal) {
       const curStr = blockString(m.parentUid);
       let next;
@@ -540,6 +580,61 @@ async function clearInlineTag(m) {
   setTimeout(() => refreshDecorations(true), 120);
 }
 
+// ── Roam 的 block 多選（藍底）──────────────────────────────
+// 為什麼需要這段：Roam 在「跨 block 拖曳」的當下會接管選取，改成它自己的
+// block 多選（藍底），同時把瀏覽器原生 selection 清掉。所以 window.getSelection()
+// 會是 collapsed → captureSelection 直接 return null → 小鈕不會出現。
+// 底下三層防禦，並在 Console 印出實際生效的來源，方便日後 Roam 改版時追。
+function roamMultiSelectUids() {
+  // (1) 官方 API（若這版 Roam 有提供，最可靠，不受 class 改名影響）
+  try {
+    const api = window.roamAlphaAPI && window.roamAlphaAPI.ui;
+    const cands = [api && api.individualMultiselect, api && api.multiselect];
+    for (const ms of cands) {
+      if (ms && typeof ms.getSelectedUids === "function") {
+        const uids = ms.getSelectedUids();
+        if (Array.isArray(uids) && uids.length) {
+          if (roamMultiSelectUids._src !== "api") { console.log("[請CC修改] 多選來源＝roamAlphaAPI.ui.*.getSelectedUids()"); roamMultiSelectUids._src = "api"; }
+          return uids.filter(Boolean);
+        }
+      }
+    }
+  } catch (e) {}
+  // (2) DOM fallback：掃 Roam 標為已選取的 block（多候選，Roam 改版時仍可能命中其一）
+  const SELECTORS = [
+    ".block-highlight-blue",
+    ".roam-block-container.block-highlight-blue",
+    ".rm-block--selected",
+    "[data-block-selected='true']",
+    ".block-highlight-grey",
+  ];
+  for (const sel of SELECTORS) {
+    let nodes = [];
+    try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) { continue; }
+    if (!nodes.length) continue;
+    const uids = [];
+    for (const el of nodes) {
+      let u = uidFromId(el);
+      if (!u) { const inner = el.querySelector('.rm-block-text, .roam-block, [id^="block-input"]'); if (inner) u = uidFromId(inner); }
+      if (u && !uids.includes(u)) uids.push(u);
+    }
+    if (uids.length) {
+      if (roamMultiSelectUids._src !== sel) { console.log("[請CC修改] 多選來源＝DOM selector", sel, "→", uids.length, "個 block"); roamMultiSelectUids._src = sel; }
+      return uids;
+    }
+  }
+  return [];
+}
+// 多選時原生 selection 是空的，取第一個被選中 block 的位置當小鈕錨點
+function roamMultiSelectRect() {
+  const uids = roamMultiSelectUids();
+  if (!uids.length) return null;
+  const el = findBlockTextEl(uids[0]);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return (r.width || r.height) ? r : null;
+}
+
 // ── 擷取選取 ─────────────────────────────────────────────────
 function captureSelection(allowWholeBlock) {
   const ae = document.activeElement;
@@ -567,11 +662,20 @@ function captureSelection(allowWholeBlock) {
       .filter((el) => { try { return sel.containsNode(el, true); } catch (e) { return false; } });
     const uids = [];
     for (const el of blocks) { const u = uidFromId(el); if (u && !uids.includes(u)) uids.push(u); }
-    if (uids.length > 1) return { marks: uids.map((u) => ({ parentUid: u, quote: "", occurrence: 1 })), label: uids.length + " 個段落（整段）" };
+    if (uids.length > 1) return { marks: [{ parentUid: uids[0], quote: "", occurrence: 1, rangeUids: uids }], label: uids.length + " 段（合為一個標記）" };
     const container = findBlockTextEl(startUid) || startEl;
     const off = offsetInContainer(container, range.startContainer, range.startOffset);
     const occ = occurrenceOf(container.textContent || "", t, off);
     return { marks: [{ parentUid: startUid, quote: t, occurrence: occ }], label: "「" + t + "」" };
+  }
+  // 原生 selection 沒東西 → 可能是 Roam 已接管成 block 多選（藍底），改讀它的狀態
+  const multi = roamMultiSelectUids();
+  if (multi.length > 1) {
+    // 一個標記涵蓋整個範圍，掛在第一段底下。理由見 markString 的註解。
+    return { marks: [{ parentUid: multi[0], quote: "", occurrence: 1, rangeUids: multi }], label: multi.length + " 段（合為一個標記）" };
+  }
+  if (multi.length === 1 && allowWholeBlock) {
+    return { marks: [{ parentUid: multi[0], quote: "", occurrence: 1 }], label: "（整段 block）" };
   }
   return null;
 }
@@ -582,7 +686,7 @@ function selectionRect() {
     const r = sel.getRangeAt(0).getBoundingClientRect();
     if (r.width || r.height) return r;
   }
-  return null;
+  return roamMultiSelectRect();   // block 多選時原生 selection 是空的
 }
 function markFromSelection(x, y, viaKeyboard, forceIntent) {
   const cap = captureSelection(viaKeyboard);
@@ -617,7 +721,11 @@ function onMouseUp(e) {
   if (panelEl && panelEl.contains(e.target)) return;
   if (triggerBtn && triggerBtn.contains(e.target)) return;
   if (fabRow && fabRow.contains(e.target)) return;
-  setTimeout(() => markFromSelection(e.pageX, e.pageY, false), 10);
+  // Roam 把跨 block 拖曳轉成 block 多選需要一點時間，10ms 沒抓到就再補一次
+  setTimeout(() => {
+    if (markFromSelection(e.pageX, e.pageY, false)) return;
+    setTimeout(() => markFromSelection(e.pageX, e.pageY, false), 140);
+  }, 10);
 }
 function keyboardAnchorXY() {
   const sel = window.getSelection();
@@ -681,7 +789,17 @@ function setIntent(it) {
   renderPickedLine();
   panelEl.querySelector(".ccm-chips").style.display = it === "潤" ? "flex" : "none";
 }
-function showTrigger(x, y) { triggerBtn.style.display = "flex"; triggerBtn.style.left = clampX(x, triggerBtn.offsetWidth) + "px"; triggerBtn.style.top = y + "px"; }
+function showTrigger(x, y) {
+  triggerBtn.style.display = "flex"; triggerBtn.style.left = clampX(x, triggerBtn.offsetWidth) + "px"; triggerBtn.style.top = y + "px";
+  // block 多選時，「＋新段」與「📷加照片」只吃 marks[0]（單一 block 語意），
+  // 顯示出來會讓人以為對全部選取生效 → 多選時直接藏掉，只留「請CC修改」。
+  const n = (pending && pending.marks && pending.marks.length) || 1;
+  const multi = n > 1;
+  const ins = triggerBtn.querySelector(".ccm-trig-insert");
+  const pho = triggerBtn.querySelector(".ccm-trig-photo");
+  if (ins) ins.style.display = multi ? "none" : "";
+  if (pho) pho.style.display = multi ? "none" : "";
+}
 function hideTrigger() { if (triggerBtn) triggerBtn.style.display = "none"; }
 
 // ── 面板的「目標行」：這次到底要改片段還是整段（2026-09-07）──────────────
@@ -735,7 +853,7 @@ async function submitPanel() {
   try { window.getSelection().removeAllRanges(); } catch (e) {}
   hidePanel(); clearAllBubbles();
   if (p.mode === "edit") await updateMark(p.childUid, panelIntent, ins, p.quote, p.occurrence);
-  else for (const m of p.marks) await createMark(m.parentUid, panelIntent, ins, m.quote, m.occurrence);
+  else for (const m of p.marks) await createMark(m.parentUid, panelIntent, ins, m.quote, m.occurrence, m.rangeUids);
 }
 
 // ── 打包本頁「待處理」給 CC ─────────────────────────────────
@@ -2480,7 +2598,8 @@ function onload({ extensionAPI }) {
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
   console.log("[請CC修改] v11 loaded — 📐 排版依據換成 Bear 的敘事骨架；標題只准『升格他自己的句子』或『路標白名單』，CC 不准造標題");
-  setTimeout(() => toast("請CC修改 v11 已載入：標題改成『升格你自己那句』或路標白名單（CC 不准造標題）＋排版照你的 ECG 敘事骨架落位"), 600);   // 載入確認：看到這則＝新碼真的上了
+  console.log(`[請CC修改] extension ${CCM_VERSION} 已載入 — ${CCM_VERSION_NOTE}`);
+  setTimeout(() => toast(`請CC修改 ${CCM_VERSION} 已載入：${CCM_VERSION_NOTE}`), 600);   // 載入確認：看到這則＝新碼真的上了
 }
 function onunload() {
   document.removeEventListener("mouseup", onMouseUp);
