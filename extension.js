@@ -16,8 +16,8 @@
 // ⚠️ 改完程式碼一定要 bump 這個版本號 —— 它是 Bear reload 後唯一能確認「新碼有沒有上」的訊號。
 // （2026-09-08 踩過：改了跨 block 支援卻沒 bump，Bear reload 後看到的還是 v11 的 toast，
 //   完全無法判斷載入成功與否。版本號散在 toast 字串裡是根因，故抽成常數。）
-const CCM_VERSION = "v12";
-const CCM_VERSION_NOTE = "跨 block 標記：框選連續多段＝一個標記（含【範圍】），套用可分段替換或合併";
+const CCM_VERSION = "v13";
+const CCM_VERSION_NOTE = "跨 block 標記改良：標記掛最後一段（不再插在中間切開內容），範圍內每一段都上底線";
 
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
@@ -116,7 +116,8 @@ function markString(intent, instruction, quote, occurrence, rangeUids) {
   // 拆成兩個獨立標記會讓 CC 兩邊都看不到全貌）。範圍記 uid 純文字，不用 (( )) —
   // block ref 的預覽會夾帶對方的圖片，逐行掃描時會誤判。
   if (Array.isArray(rangeUids) && rangeUids.length > 1) {
-    s += ` 【範圍】共 ${rangeUids.length} 段：本段 + ${rangeUids.slice(1).join(" ")}`;
+    // 全部列出（含標記所掛的那段），由上而下。標記掛在最後一段底下，所以不能再寫「本段 + …」。
+    s += ` 【範圍】共 ${rangeUids.length} 段（由上而下）：${rangeUids.join(" ")}`;
   }
   if (quote) { if (occurrence > 1) s += ` 【第${occurrence}處】`; s += ` 【原文】「${quote}」`; }
   return s;
@@ -440,7 +441,17 @@ function refreshDecorations(force) {
 
   applying = true;
   clearDecorations();
-  for (const m of desired) { const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m); if (!m.inline) flagChildBlock(m.childUid); }
+  for (const m of desired) {
+    const el = findBlockTextEl(m.parentUid); if (el) decorateMark(el, m);
+    // 跨 block 標記：範圍內其他段也要上底線，否則畫面上看不出它們也被這個標記涵蓋
+    if (m.rangeUids && m.rangeUids.length > 1) {
+      for (const u of m.rangeUids) {
+        if (u === m.parentUid) continue;
+        const el2 = findBlockTextEl(u); if (el2) decorateMark(el2, m);
+      }
+    }
+    if (!m.inline) flagChildBlock(m.childUid);
+  }
   updatePill(todoCount, reviewCount, draftCount);
   updateReformatBtn(pageUid);
   syncPinned(desired); syncNav(desired);
@@ -662,7 +673,7 @@ function captureSelection(allowWholeBlock) {
       .filter((el) => { try { return sel.containsNode(el, true); } catch (e) { return false; } });
     const uids = [];
     for (const el of blocks) { const u = uidFromId(el); if (u && !uids.includes(u)) uids.push(u); }
-    if (uids.length > 1) return { marks: [{ parentUid: uids[0], quote: "", occurrence: 1, rangeUids: uids }], label: uids.length + " 段（合為一個標記）" };
+    if (uids.length > 1) return { marks: [{ parentUid: uids[uids.length - 1], quote: "", occurrence: 1, rangeUids: uids }], label: uids.length + " 段（合為一個標記）" };
     const container = findBlockTextEl(startUid) || startEl;
     const off = offsetInContainer(container, range.startContainer, range.startOffset);
     const occ = occurrenceOf(container.textContent || "", t, off);
@@ -671,8 +682,9 @@ function captureSelection(allowWholeBlock) {
   // 原生 selection 沒東西 → 可能是 Roam 已接管成 block 多選（藍底），改讀它的狀態
   const multi = roamMultiSelectUids();
   if (multi.length > 1) {
-    // 一個標記涵蓋整個範圍，掛在第一段底下。理由見 markString 的註解。
-    return { marks: [{ parentUid: multi[0], quote: "", occurrence: 1, rangeUids: multi }], label: multi.length + " 段（合為一個標記）" };
+    // 一個標記涵蓋整個範圍，掛在**最後一段**底下（v13 改）：掛第一段的話，標記 block 會夾在
+    // A 和 B 之間，把「本來就該讀成一體」的兩段從視覺上切開——那正好違背 Bear 框選它們的理由。
+    return { marks: [{ parentUid: multi[multi.length - 1], quote: "", occurrence: 1, rangeUids: multi }], label: multi.length + " 段（合為一個標記）" };
   }
   if (multi.length === 1 && allowWholeBlock) {
     return { marks: [{ parentUid: multi[0], quote: "", occurrence: 1 }], label: "（整段 block）" };
