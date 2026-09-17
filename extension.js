@@ -16,8 +16,8 @@
 // ⚠️ 改完程式碼一定要 bump 這個版本號 —— 它是 Bear reload 後唯一能確認「新碼有沒有上」的訊號。
 // （2026-09-08 踩過：改了跨 block 支援卻沒 bump，Bear reload 後看到的還是 v11 的 toast，
 //   完全無法判斷載入成功與否。版本號散在 toast 字串裡是根因，故抽成常數。）
-const CCM_VERSION = "v14";
-const CCM_VERSION_NOTE = "重排版自動辨識 /ecg-case 稿：骨架已定案，只做版面、不動順序";
+const CCM_VERSION = "v15";
+const CCM_VERSION_NOTE = "潤稿面板加「什麼意思?」快捷鈕；潤/接 待審卡會顯示 CC 的備註說明";
 
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
@@ -27,6 +27,18 @@ const REFORMAT_BACKUP_TAG = "cc排版備份";   // 套用重排後，原稿整�
 const BC_URL = "https://composer.agoodbear.com";   // Blog Composer（照片庫，picker 彈窗來源）
 const INTENTS = ["潤", "接", "查", "議"];
 const INTENT_HINT = { "潤": "改這句（口語化/縮短/去AI腔…）", "接": "幫我起一段草稿", "查": "查證/補來源，不改字", "議": "給我選項/建議" };
+// 潤稿快捷鈕：點一下把指令塞進輸入框（hover 看得到實際會塞什麼）。
+// solo=自成一件事的整句指令，不跟「口語化、縮短」這種短詞用「、」串起來 → 改用「；」接在後面；
+// 兩種都**只追加、不覆蓋**已經打好的字。
+const POLISH_CHIPS = [
+  { label: "口語化" },
+  { label: "縮短" },
+  { label: "去 AI 腔" },
+  {
+    label: "什麼意思?", solo: true,
+    seed: "這句我看不懂：先在備註欄用白話解釋它在講什麼（專有名詞也要解釋），再把它改寫成我看得懂的版本放提案欄。不准加新資訊、不准改掉醫學上的意思",
+  },
+];
 
 let api;
 let styleEl, overlayEl, panelEl, pillEl, triggerBtn, toggleBtn, navEl;
@@ -254,6 +266,9 @@ function buildBubbleDOM(m, anchorEl) {
       if (m.intent === "潤" && m.proposal) { if (m.quote) diff.appendChild(row("old", "原文", m.quote)); diff.appendChild(row("new", "改為", m.proposal)); }
       else if (m.intent === "接" && m.proposal) { diff.appendChild(row("new", "新增", m.proposal)); }
       else { if (m.quote) diff.appendChild(row("old", "原文", m.quote)); diff.appendChild(row("note", "說明", m.note || m.proposal || "(無內容)")); }
+      // 潤/接 的【備註】以前一律不顯示 → CC 寫的解釋（例如「什麼意思?」要的白話說明）Bear 在卡片上根本看不到。
+      // 有提案時才在這裡補（沒提案的情況上面那行已經把 note 當主體印出來了，不能印兩次）。
+      if (m.proposal && m.note) diff.appendChild(row("note", "說明", m.note));
     } else {   // 查/議：原文 + 查證/建議意見 +（若有）整合版
       if (m.quote) diff.appendChild(row("old", "原文", m.quote));
       diff.appendChild(row("note", m.intent === "查" ? "查證" : "建議", m.note || "(無內容)"));
@@ -2099,13 +2114,27 @@ function buildUI() {
     '<div class="ccm-picked"></div>' +
     '<div class="ccm-ref"></div>' +
     '<textarea placeholder="一句話說怎麼改…（Enter 送出，⌥1–4 選意圖）"></textarea>' +
-    '<div class="ccm-chips"><span>口語化</span><span>縮短</span><span>去 AI 腔</span></div>' +
+    '<div class="ccm-chips"></div>' +
     '<div class="ccm-actions"><button class="ccm-delete">刪除</button><button class="ccm-cancel">取消</button><button class="ccm-save">送出</button></div>';
   document.body.appendChild(panelEl); panelEl.style.display = "none";
 
   panelEl.querySelectorAll(".ccm-intents button").forEach((btn) => btn.onclick = () => { setIntent(btn.dataset.intent); panelEl.querySelector("textarea").focus(); });
-  panelEl.querySelector(".ccm-chips").addEventListener("click", (e) => {
-    if (e.target.tagName === "SPAN") { const ta = panelEl.querySelector("textarea"); ta.value = (ta.value ? ta.value + "、" : "") + e.target.textContent; ta.focus(); }
+  const chipsEl = panelEl.querySelector(".ccm-chips");
+  POLISH_CHIPS.forEach((c) => {
+    const sp = document.createElement("span");
+    sp.textContent = c.label;
+    sp.dataset.seed = c.seed || c.label;       // 用 dataset 帶整句指令（避免塞進 innerHTML 要跳脫引號）
+    sp.title = c.seed ? "會填入：" + c.seed : c.label;
+    if (c.solo) sp.classList.add("ccm-chip-solo");
+    chipsEl.appendChild(sp);
+  });
+  chipsEl.addEventListener("click", (e) => {
+    if (e.target.tagName !== "SPAN") return;
+    const ta = panelEl.querySelector("textarea");
+    const seed = e.target.dataset.seed || e.target.textContent;
+    const sep = e.target.classList.contains("ccm-chip-solo") ? "；" : "、";
+    ta.value = ta.value ? ta.value + sep + seed : seed;
+    ta.focus();
   });
   panelEl.querySelector(".ccm-cancel").onclick = hidePanel;
   panelEl.querySelector(".ccm-save").onclick = submitPanel;
@@ -2527,6 +2556,9 @@ function injectStyle() {
   .ccm-chips{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0;}
   .ccm-chips span{font-size:11.5px;cursor:pointer;border:1px solid #dbe1e8;background:#f7f9fb;border-radius:999px;padding:3px 9px;color:#4a5560;}
   .ccm-chips span:hover{background:#2b7de0;color:#fff;border-color:#2b7de0;}
+  /* 「什麼意思?」這種整句指令：虛線框跟「口語化/縮短」那類短詞區分開，一眼看得出不是同一種東西 */
+  .ccm-chips span.ccm-chip-solo{border-style:dashed;border-color:#c3b28a;background:#fdf8ec;color:#8a6d1c;}
+  .ccm-chips span.ccm-chip-solo:hover{background:#b8912a;color:#fff;border-color:#b8912a;}
   .ccm-actions{display:flex;gap:7px;margin-top:4px;align-items:center;}
   .ccm-actions button{font-size:12.5px;cursor:pointer;border-radius:7px;padding:5px 12px;border:1px solid transparent;}
   .ccm-delete{margin-right:auto;background:#fff;color:#e5484d;border:1px solid #f3c0c2 !important;}
@@ -2644,7 +2676,6 @@ function onload({ extensionAPI }) {
   ];
   cmds.forEach((c) => window.roamAlphaAPI.ui.commandPalette.addCommand(c));
   setTimeout(() => refreshDecorations(true), 400);
-  console.log("[請CC修改] v11 loaded — 📐 排版依據換成 Bear 的敘事骨架；標題只准『升格他自己的句子』或『路標白名單』，CC 不准造標題");
   console.log(`[請CC修改] extension ${CCM_VERSION} 已載入 — ${CCM_VERSION_NOTE}`);
   setTimeout(() => toast(`請CC修改 ${CCM_VERSION} 已載入：${CCM_VERSION_NOTE}`), 600);   // 載入確認：看到這則＝新碼真的上了
 }
