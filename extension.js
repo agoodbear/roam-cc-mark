@@ -16,8 +16,8 @@
 // ⚠️ 改完程式碼一定要 bump 這個版本號 —— 它是 Bear reload 後唯一能確認「新碼有沒有上」的訊號。
 // （2026-09-08 踩過：改了跨 block 支援卻沒 bump，Bear reload 後看到的還是 v11 的 toast，
 //   完全無法判斷載入成功與否。版本號散在 toast 字串裡是根因，故抽成常數。）
-const CCM_VERSION = "v15";
-const CCM_VERSION_NOTE = "潤稿面板加「什麼意思?」快捷鈕；潤/接 待審卡會顯示 CC 的備註說明";
+const CCM_VERSION = "v16";
+const CCM_VERSION_NOTE = "按 ✅ 之後改稿紀錄不再消失，指令與原文會存進「🗃 改稿紀錄」page";
 
 const TODO_TAG = "請cc修改";
 const PROP_TAG = "cc提案";
@@ -531,10 +531,15 @@ function siblingAfter(uid) {
 // ✅ 接受＝Bear 把提案套進原稿（唯一讓字進原稿的動作）
 async function acceptMark(m, mode) {
   clearAllBubbles();
+  // 套用之前先把原文抄下來 —— 下面每條分支最後都會 deleteBlock(m.childUid)，
+  // 套完再讀就只剩改後的字，「改前長什麼樣」永遠追不回來（見 logRevision）。
+  const beforeStr = blockString(m.parentUid);
+  let outcome = null;
   try {
     const replace = mode === "apply" || (!mode && m.intent === "潤");   // 潤的✅ 或 查/議的「套用整合版」都走替換
     if (mode === "clear") {
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+      outcome = "cleared";
       toast("已完成（未改字）");
     } else if (replace && m.proposal && m.rangeUids && m.rangeUids.length > 1 && !m.quote) {
       // ── 跨 block 標記（Bear 框選 A、B 因為它們在講同一件事）─────────────
@@ -548,6 +553,7 @@ async function acceptMark(m, mode) {
       if (parts.length === uids.length) {
         for (let i = 0; i < uids.length; i++) await window.roamAlphaAPI.updateBlock({ block: { uid: uids[i], string: parts[i] } });
         await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+        outcome = "split";
         toast(`已套用：${uids.length} 段各自替換`);
       } else {
         await window.roamAlphaAPI.updateBlock({ block: { uid: uids[0], string: m.proposal } });
@@ -556,6 +562,7 @@ async function acceptMark(m, mode) {
           await window.roamAlphaAPI.updateBlock({ block: { uid: uids[i], string: "🗑 已併入上一段（確認後請自行刪除）｜原文：" + old } });
         }
         await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+        outcome = "merged";
         toast(`已合併進第 1 段；其餘 ${uids.length - 1} 段標成可刪（原文留在該行，沒有刪掉任何 block）`);
       }
     } else if (replace && m.proposal) {
@@ -565,6 +572,7 @@ async function acceptMark(m, mode) {
       else next = m.proposal;
       await window.roamAlphaAPI.updateBlock({ block: { uid: m.parentUid, string: next } });
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+      outcome = "replaced";
       toast("已接受並套用");
     } else if (!mode && m.intent === "接" && m.proposal) {
       // 標記掛在標題上時，草稿要落在「那一節的最後」。插在標題的兄弟位置會掉到整節外面，
@@ -574,12 +582,16 @@ async function acceptMark(m, mode) {
         : siblingAfter(m.parentUid);
       await window.roamAlphaAPI.createBlock({ location: { "parent-uid": pos.parent, order: pos.order }, block: { string: m.proposal + " #" + DRAFT_TAG } });
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+      outcome = "inserted";
       toast("已插入草稿（掛 #cc草稿，記得改寫收編）");
     } else {
       await window.roamAlphaAPI.deleteBlock({ block: { uid: m.childUid } });
+      outcome = "closed";
       toast("已標記完成");
     }
   } catch (e) { console.warn("[請CC修改] accept failed", e); toast("套用失敗（見 Console）"); }
+  // 獨立 try：紀錄寫失敗絕不能擋主流程，也不該讓 Bear 看到錯誤（他的 ✅ 已經生效了）
+  try { await logRevision(m, outcome, beforeStr); } catch (e) { console.warn("[請CC修改] ledger failed", e); }
   setTimeout(() => refreshDecorations(true), 120);
 }
 
@@ -1646,6 +1658,83 @@ const roamPlanApi = {
   del: (uid) => window.roamAlphaAPI.deleteBlock({ block: { uid } }),
 };
 
+
+// ── 改稿紀錄（🗃）：把「為什麼要改」留下來 ──────────────────────────────────
+// 2026-09-18 起。acceptMark 每條分支的最後一步都是 deleteBlock(m.childUid)，也就是 Bear
+// 按下 ✅ 的那一刻，指令、原文、提案三樣一起從 graph 消失 —— 這個 extension 上線兩個月，
+// 所有 Roam 改稿的判斷理由一筆都沒留下。最有價值的其實不是 diff 本身，是 m.instruction
+// （他為什麼覺得這裡該改）：「再寫簡單一點」「這邊需要做成一個 flowchart」這種話，
+// 之後要拿來歸納他的寫作風格、回頭餵給寫初稿的流程。
+//
+// 存獨立 page，刻意不掛在原稿頁底下：2026-09-07 版次表掛進稿裡，害 isReformatExcludedRoot()
+// 失效（它只對 top-level 生效），同樣的坑不踩第二次。也不寫 [[日期]]、不留任何 tag，
+// 免得這些紀錄跑進 Bear 的 daily note linked references 吵他。
+const LEDGER_PAGE = "🗃 改稿紀錄";
+const LEDGER_OUTCOME = {
+  replaced: "已套用（替換）", split: "已套用（各段替換）", merged: "已套用（合併）",
+  inserted: "已插入草稿", cleared: "已完成（未改字）", closed: "已標記完成",
+};
+
+// 原文裡的 [[頁]] ((uid)) #tag {{組件}} ![](圖) 原樣寫進 ledger 會產生 refs，
+// 讓這些紀錄冒到 Bear 的 linked references 上、block-ref 預覽還會夾帶對方的圖片。
+// 插一個零寬空格進去：畫面上逐字相同、Roam 不再 parse，分析端去掉 ​ 就還原。
+function ledgerSafe(v) {
+  return String(v == null ? "" : v)
+    .replace(/!\[/g, "!​[").replace(/\[\[/g, "[​[")
+    .replace(/\(\(/g, "(​(").replace(/\{\{/g, "{​{")
+    .replace(/#/g, "#​");
+}
+function ledgerStamp() {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");   // 本機就是 UTC+8，getHours 直接給台灣時間
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function ledgerFindPage() {
+  try {
+    const r = window.roamAlphaAPI.q(`[:find ?u :where [?e :node/title "${LEDGER_PAGE}"] [?e :block/uid ?u]]`);
+    return (r && r[0] && r[0][0]) || null;
+  } catch (e) { return null; }
+}
+function ledgerFindChild(parentUid, text) {
+  try {
+    const n = window.roamAlphaAPI.pull("[{:block/children [:block/uid :block/string]}]", [":block/uid", parentUid]);
+    const hit = ((n && n[":block/children"]) || []).find((c) => (c[":block/string"] || "").trim() === text);
+    return hit ? hit[":block/uid"] : null;
+  } catch (e) { return null; }
+}
+
+// 一筆紀錄＝一個摘要 block ＋ 指令/原文/改為/備註 四個子層，掛在「該篇原稿」的 section 底下。
+// 失敗一律吞掉：Bear 的 ✅ 早就生效了，紀錄寫不進去不該讓他看到錯誤。
+async function logRevision(m, outcome, beforeStr) {
+  if (!m || !outcome) return;
+  const page = currentPage();
+  const section = (page && page.title) || "（不明原稿）";
+  let pageUid = ledgerFindPage();
+  if (!pageUid) {
+    pageUid = roamPlanApi.newUid();
+    await window.roamAlphaAPI.createPage({ page: { title: LEDGER_PAGE, uid: pageUid } });
+  }
+  let secUid = ledgerFindChild(pageUid, section);
+  if (!secUid) {
+    secUid = roamPlanApi.newUid();
+    await roamPlanApi.create({ parent: pageUid, order: 0, uid: secUid, string: section });   // 最近改的那篇排最上面
+  }
+  const headUid = roamPlanApi.newUid();
+  await roamPlanApi.create({
+    parent: secUid, order: 0, uid: headUid,
+    string: `${ledgerStamp()} · ${m.intent || "?"} · ${LEDGER_OUTCOME[outcome] || outcome}`,
+  });
+  const rows = [];
+  if (m.instruction) rows.push("指令：" + m.instruction);       // ← 分析時最有價值的一欄
+  const target = m.quote || beforeStr;
+  if (target) rows.push("原文：" + target);
+  if (m.proposal) rows.push("改為：" + m.proposal);
+  if (m.note) rows.push("備註：" + m.note);
+  if (m.quote && beforeStr && beforeStr !== m.quote) rows.push("整段：" + beforeStr);   // 圈的是片段時補上下文
+  rows.push("位置：" + (m.parentUid || "?"));
+  for (let i = 0; i < rows.length; i++) {
+    await roamPlanApi.create({ parent: headUid, order: i, uid: roamPlanApi.newUid(), string: ledgerSafe(rows[i]) });
+  }
+}
 
 // ── 改稿版次表（🗂）：套用成功後由 extension 自己補一行 ─────────────────────
 // 2026-09-07 Bear 要求。原本 PROTOCOL §十 規定由 CC 手動維護，但同一天 CC 就漏了兩次
